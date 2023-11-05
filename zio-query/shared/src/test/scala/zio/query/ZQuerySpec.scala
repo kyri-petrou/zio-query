@@ -49,6 +49,12 @@ object ZQuerySpec extends ZIOBaseSpec {
           result <- getUserNameById(27).map(identity).optional.run
         } yield assert(result)(isNone)
       },
+      test("queries with the same cache can be run in parallel") {
+        for {
+          cache <- zio.query.Cache.empty
+          _     <- ZIO.foreachParDiscard(1 to 100)(_ => getAllUserNames.runCache(cache))
+        } yield assertCompletes
+      } @@ nonFlaky,
       suite("zip")(
         test("arbitrary effects are executed in order") {
           for {

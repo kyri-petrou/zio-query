@@ -1250,14 +1250,19 @@ object ZQuery {
                     )
                   )
                 case Right(ref) =>
-                  ref.get.map {
-                    case None    => Result.blocked(BlockedRequests.empty, Continue(request, dataSource, ref))
-                    case Some(b) => Result.fromExit(b)
+                  def delegate = Result.blocked(BlockedRequests.empty, Continue(request, dataSource, ref))
+                  ref.poll.flatMap {
+                    case None => ZIO.succeed(delegate)
+                    case Some(io) =>
+                      io.map {
+                        case None    => delegate
+                        case Some(v) => Result.fromExit(v)
+                      }
                   }
               }
             }
           } else {
-            Ref.make(Option.empty[Exit[E, B]]).map { ref =>
+            Promise.make[Nothing, Option[Exit[E, B]]].map { ref =>
               Result.blocked(
                 BlockedRequests.single(dataSource, BlockedRequest(request, ref)),
                 Continue(request, dataSource, ref)

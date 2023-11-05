@@ -33,7 +33,7 @@ trait Cache {
    * cache but has not been executed yet, or `Ref(Some(value))` if the request
    * has been executed.
    */
-  def get[E, A](request: Request[E, A])(implicit trace: Trace): IO[Unit, Ref[Option[Exit[E, A]]]]
+  def get[E, A](request: Request[E, A])(implicit trace: Trace): IO[Unit, Promise[Nothing, Option[Exit[E, A]]]]
 
   /**
    * Looks up a request in the cache. If the request is not in the cache returns
@@ -45,13 +45,13 @@ trait Cache {
   def lookup[R, E, A, B](request: A)(implicit
     ev: A <:< Request[E, B],
     trace: Trace
-  ): UIO[Either[Ref[Option[Exit[E, B]]], Ref[Option[Exit[E, B]]]]]
+  ): UIO[Either[Promise[Nothing, Option[Exit[E, B]]], Promise[Nothing, Option[Exit[E, B]]]]]
 
   /**
    * Inserts a request and a `Ref` that will contain the result of the request
    * when it is executed into the cache.
    */
-  def put[E, A](request: Request[E, A], result: Ref[Option[Exit[E, A]]])(implicit trace: Trace): UIO[Unit]
+  def put[E, A](request: Request[E, A], result: Promise[Nothing, Option[Exit[E, A]]])(implicit trace: Trace): UIO[Unit]
 
   /**
    * Removes a request from the cache.
@@ -69,23 +69,23 @@ object Cache {
 
   private final class Default(private val state: Ref[Map[Any, Any]]) extends Cache {
 
-    def get[E, A](request: Request[E, A])(implicit trace: Trace): IO[Unit, Ref[Option[Exit[E, A]]]] =
-      state.get.map(_.get(request).asInstanceOf[Option[Ref[Option[Exit[E, A]]]]]).some.orElseFail(())
+    def get[E, A](request: Request[E, A])(implicit trace: Trace): IO[Unit, Promise[Nothing, Option[Exit[E, A]]]] =
+      state.get.map(_.get(request).asInstanceOf[Option[Promise[Nothing, Option[Exit[E, A]]]]]).some.orElseFail(())
 
     def lookup[R, E, A, B](request: A)(implicit
       ev: A <:< Request[E, B],
       trace: Trace
-    ): UIO[Either[Ref[Option[Exit[E, B]]], Ref[Option[Exit[E, B]]]]] =
-      Ref.make(Option.empty[Exit[E, B]]).flatMap { ref =>
+    ): UIO[Either[Promise[Nothing, Option[Exit[E, B]]], Promise[Nothing, Option[Exit[E, B]]]]] =
+      Promise.make[Nothing, Option[Exit[E, B]]].flatMap { ref =>
         state.modify { map =>
           map.get(request) match {
             case None      => (Left(ref), map + (request -> ref))
-            case Some(ref) => (Right(ref.asInstanceOf[Ref[Option[Exit[E, B]]]]), map)
+            case Some(ref) => (Right(ref.asInstanceOf[Promise[Nothing, Option[Exit[E, B]]]]), map)
           }
         }
       }
 
-    def put[E, A](request: Request[E, A], result: Ref[Option[Exit[E, A]]])(implicit trace: Trace): UIO[Unit] =
+    def put[E, A](request: Request[E, A], result: Promise[Nothing, Option[Exit[E, A]]])(implicit trace: Trace): UIO[Unit] =
       state.update(_ + (request -> result))
 
     def remove[E, A](request: Request[E, A])(implicit trace: Trace): UIO[Unit] =

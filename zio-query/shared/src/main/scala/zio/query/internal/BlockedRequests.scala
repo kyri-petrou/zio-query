@@ -19,7 +19,7 @@ package zio.query.internal
 import zio.query.internal.BlockedRequests._
 import zio.query.{Cache, CompletedRequestMap, DataSource, DataSourceAspect, Described, ZQuery}
 import zio.stacktracer.TracingImplicits.disableAutoTrace
-import zio.{Exit, Ref, Trace, ZEnvironment, ZIO}
+import zio.{Exit, Promise, Ref, Trace, ZEnvironment, ZIO}
 
 import scala.annotation.tailrec
 
@@ -115,10 +115,13 @@ private[query] sealed trait BlockedRequests[-R] { self =>
             blockedRequests = sequential.flatten
             leftovers       = completedRequests.requests -- blockedRequests.map(_.request)
             _ <- ZIO.foreachDiscard(blockedRequests) { blockedRequest =>
-                   blockedRequest.result.set(completedRequests.lookup(blockedRequest.request))
+                   blockedRequest.result.succeed(completedRequests.lookup(blockedRequest.request))
                  }
             _ <- ZIO.foreachDiscard(leftovers) { request =>
-                   Ref.make(completedRequests.lookup(request)).flatMap(cache.put(request, _))
+                   Promise
+                     .make[Nothing, Option[Exit[Any, Any]]]
+                     .tap(_.succeed(completedRequests.lookup(request)))
+                     .flatMap(cache.put(request, _))
                  }
           } yield ()
         }
