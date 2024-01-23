@@ -25,7 +25,7 @@ import zio.stacktracer.TracingImplicits.disableAutoTrace
  * requests from those data sources that must be executed sequentially.
  */
 private[query] final class Sequential[-R](
-  private val map: Map[DataSource[Any, Any], Chunk[Chunk[BlockedRequest[Any]]]]
+  private val map: Map[DataSource[Any, Any], List[Chunk[BlockedRequest[Any]]]]
 ) { self =>
 
   /**
@@ -37,7 +37,7 @@ private[query] final class Sequential[-R](
   def ++[R1 <: R](that: Sequential[R1]): Sequential[R1] =
     new Sequential(
       that.map.foldLeft(self.map) { case (map, (k, v)) =>
-        map + (k -> map.get(k).fold[Chunk[Chunk[BlockedRequest[Any]]]](v)(_ ++ v))
+        map + (k -> map.get(k).fold[List[Chunk[BlockedRequest[Any]]]](v)(_ ::: v))
       }
     )
 
@@ -60,5 +60,6 @@ private[query] final class Sequential[-R](
    * batches of requests from those data sources.
    */
   def toIterable: Iterable[(DataSource[R, Any], Chunk[Chunk[BlockedRequest[Any]]])] =
-    map
+    map.transform { case (_, v) => Chunk.fromIterable(v) }
+
 }

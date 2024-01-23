@@ -19,6 +19,8 @@ package zio.query
 import zio.Exit
 import zio.stacktracer.TracingImplicits.disableAutoTrace
 
+import scala.collection.mutable
+
 /**
  * A `CompletedRequestMap` is a universally quantified mapping from requests of
  * type `Request[E, A]` to results of type `Exit[E, A]` for all types `E` and
@@ -28,7 +30,7 @@ import zio.stacktracer.TracingImplicits.disableAutoTrace
  * types for different requests while guaranteeing that results will be of the
  * type requested.
  */
-final class CompletedRequestMap private (private val map: Map[Any, Exit[Any, Any]]) { self =>
+final class CompletedRequestMap private (private val map: mutable.Map[Any, Exit[Any, Any]]) { self =>
 
   def ++(that: CompletedRequestMap): CompletedRequestMap =
     new CompletedRequestMap(self.map ++ that.map)
@@ -64,8 +66,14 @@ final class CompletedRequestMap private (private val map: Map[Any, Exit[Any, Any
   /**
    * Collects all requests in a set.
    */
-  def requests: Set[Request[_, _]] =
-    map.keySet.asInstanceOf[Set[Request[_, _]]]
+  def requests: Set[Request[?, ?]] =
+    map.keySet.toSet.asInstanceOf[Set[Request[?, ?]]]
+
+  private[query] def remove[E, A](request: Request[E, A]): Option[Exit[E, A]] =
+    map.remove(request).asInstanceOf[Option[Exit[E, A]]]
+
+  private[query] def toList: List[(Request[?, ?], Exit[Any, Any])] =
+    map.toList.asInstanceOf[List[(Request[?, ?], Exit[Any, Any])]]
 
   override def toString: String =
     s"CompletedRequestMap(${map.mkString(", ")})"
@@ -77,19 +85,21 @@ object CompletedRequestMap {
    * An empty completed requests map.
    */
   val empty: CompletedRequestMap =
-    new CompletedRequestMap(Map.empty)
+    new CompletedRequestMap(mutable.HashMap.empty)
 
   /**
    * Constructs a completed requests map from an existing Iterable of tuples
    */
   def from[E, A, B](it: Iterable[(A, Exit[E, B])])(implicit ev: A <:< Request[E, B]): CompletedRequestMap =
-    new CompletedRequestMap(Map.from(it))
+    new CompletedRequestMap(mutable.HashMap.from[Any, Exit[?, ?]](it))
 
   private[query] def fromOptional[E, A, B](
     it: Iterable[(A, Exit[E, Option[B]])]
   )(implicit ev: A <:< Request[E, B]): CompletedRequestMap = {
-    val builder = Map.newBuilder[A, Exit[E, B]]
-    val iter    = it.iterator
+    val builder = new mutable.HashMap[Any, Exit[?, ?]]
+    builder.sizeHint(it.size)
+
+    val iter = it.iterator
     while (iter.hasNext) {
       val (key, exit) = iter.next()
       exit match {
@@ -98,13 +108,13 @@ object CompletedRequestMap {
         case Exit.Success(None)    => ()
       }
     }
-    from(builder.result())
+    new CompletedRequestMap(builder.result())
   }
 
   // Only used by Scala 2.12 where the `Map.from` method doesn't exist
-  private implicit class EnrichedMapOps[E, A, B](val map: Map.type) extends AnyVal {
-    def from[K, V](it: Iterable[(K, V)]): Map[K, V] =
-      (Map.newBuilder[K, V] ++= it).result
+  private implicit class EnrichedMapOps[E, A, B](val map: mutable.HashMap.type) extends AnyVal {
+    def from[K, V](it: Iterable[(K, V)]): mutable.HashMap[K, V] =
+      (mutable.HashMap.newBuilder[K, V] ++= it).result
   }
 
 }

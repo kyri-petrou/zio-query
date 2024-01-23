@@ -24,7 +24,7 @@ import zio.stacktracer.TracingImplicits.disableAutoTrace
  * A `Parallel[R]` maintains a mapping from data sources to requests from those
  * data sources that can be executed in parallel.
  */
-private[query] final class Parallel[-R](private val map: Map[DataSource[Any, Any], Chunk[BlockedRequest[Any]]]) {
+private[query] final class Parallel[-R](private val map: Map[DataSource[Any, Any], List[BlockedRequest[Any]]]) {
   self =>
 
   /**
@@ -35,9 +35,15 @@ private[query] final class Parallel[-R](private val map: Map[DataSource[Any, Any
   def ++[R1 <: R](that: Parallel[R1]): Parallel[R1] =
     new Parallel(
       self.map.foldLeft(that.map) { case (map, (k, v)) =>
-        map + (k -> map.get(k).fold[Chunk[BlockedRequest[Any]]](v)(_ ++ v))
+        map + (k -> map.get(k).fold[List[BlockedRequest[Any]]](v)(_ ::: v))
       }
     )
+
+  def add[R1 <: R, A](dataSource: DataSource[R1, A], blockedRequest: BlockedRequest[A]): Parallel[R1] = {
+    val key      = dataSource.asInstanceOf[DataSource[Any, Any]]
+    val requests = blockedRequest :: self.map.getOrElse(key, Nil)
+    new Parallel(self.map + ((key, requests)))
+  }
 
   /**
    * Returns whether this collection of requests is empty.
@@ -58,7 +64,7 @@ private[query] final class Parallel[-R](private val map: Map[DataSource[Any, Any
    * sequentially.
    */
   def sequential: Sequential[R] =
-    new Sequential(map.map { case (k, v) => (k, Chunk(v)) })
+    new Sequential(map.transform { case (_, v) => List(Chunk.fromIterable(v)) })
 
   /**
    * Converts this collection of requests that can be executed in parallel to an
@@ -66,7 +72,7 @@ private[query] final class Parallel[-R](private val map: Map[DataSource[Any, Any
    * data sources.
    */
   def toIterable: Iterable[(DataSource[R, Any], Chunk[BlockedRequest[Any]])] =
-    map
+    map.transform { case (_, v) => Chunk.fromIterable(v) }
 }
 
 private[query] object Parallel {
@@ -76,7 +82,7 @@ private[query] object Parallel {
    * specified data source to the specified request.
    */
   def apply[R, E, A](dataSource: DataSource[R, A], blockedRequest: BlockedRequest[A]): Parallel[R] =
-    new Parallel(Map(dataSource.asInstanceOf[DataSource[Any, Any]] -> Chunk(blockedRequest)))
+    new Parallel(Map(dataSource.asInstanceOf[DataSource[Any, Any]] -> List(blockedRequest)))
 
   /**
    * The empty collection of requests.

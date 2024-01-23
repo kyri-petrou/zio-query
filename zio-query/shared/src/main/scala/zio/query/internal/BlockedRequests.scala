@@ -19,7 +19,7 @@ package zio.query.internal
 import zio.query.internal.BlockedRequests._
 import zio.query.{Cache, CompletedRequestMap, DataSource, DataSourceAspect, Described, QueryFailure, Request, ZQuery}
 import zio.stacktracer.TracingImplicits.disableAutoTrace
-import zio.{Exit, Promise, Trace, ZEnvironment, ZIO}
+import zio.{Chunk, Exit, Promise, Trace, ZEnvironment, ZIO}
 
 import scala.annotation.tailrec
 
@@ -104,29 +104,39 @@ private[query] sealed trait BlockedRequests[-R] { self =>
     ZQuery.currentCache.get.flatMap { cache =>
       ZIO.foreachDiscard(BlockedRequests.flatten(self)) { requestsByDataSource =>
         ZIO.foreachParDiscard(requestsByDataSource.toIterable) { case (dataSource, sequential) =>
+          val requests = sequential.map(_.map(_.request))
           for {
-            completedRequests <- dataSource.runAll(sequential.map(_.map(_.request))).catchAllCause { cause =>
+            completedRequests <- dataSource.runAll(requests).catchAllCause { cause =>
                                    ZIO.succeed {
-                                     sequential.map(_.map(_.request)).flatten.foldLeft(CompletedRequestMap.empty) {
-                                       case (map, request) => map.insert(request, Exit.failCause(cause))
+                                     requests.view.flatten.foldLeft(CompletedRequestMap.empty) { case (map, request) =>
+                                       map.insert(request, Exit.failCause(cause))
                                      }
                                    }
                                  }
-            blockedRequests = sequential.flatten
-            leftovers       = completedRequests.requests -- blockedRequests.map(_.request)
-            _ <- ZIO.foreachDiscard(blockedRequests) { blockedRequest =>
-                   blockedRequest.result.done(
-                     completedRequests
-                       .lookup(blockedRequest.request)
-                       .getOrElse(Exit.die(QueryFailure(dataSource, blockedRequest.request)))
-                   )
-                 }
-            _ <- ZIO.foreachDiscard(leftovers) { request =>
-                   ZIO.foreach(completedRequests.lookup(request)) { response =>
-                     Promise
-                       .make[Any, Any]
-                       .tap(_.done(response))
-                       .flatMap(cache.put(request.asInstanceOf[Request[Any, Any]], _))
+            isCachingEnabled <- ZQuery.cachingEnabled.get
+            blocked           = sequential.flatten
+            _ <- if (isCachingEnabled) {
+                   ZIO.foreachDiscard(blocked) { blockedRequest =>
+                     blockedRequest.result.done(
+                       completedRequests
+                         .remove(blockedRequest.request)
+                         .getOrElse(Exit.die(QueryFailure(dataSource, blockedRequest.request)))
+                     )
+                   } *> ZIO.foreachDiscard[R, Nothing, (Request[_, _], Exit[Any, Any])](completedRequests.toList) {
+                     case (request, response) =>
+                       Promise
+                         .make[Any, Any]
+                         .tap(_.done(response))
+                         .flatMap(cache.put(request.asInstanceOf[Request[Any, Any]], _))
+                   }
+                 } else {
+                   // If caching is disabled there's no deduplication, so we can't remove the requests from the CompletedRequestsMap
+                   ZIO.foreachDiscard(blocked) { blockedRequest =>
+                     blockedRequest.result.done(
+                       completedRequests
+                         .lookup(blockedRequest.request)
+                         .getOrElse(Exit.die(QueryFailure(dataSource, blockedRequest.request)))
+                     )
                    }
                  }
           } yield ()
@@ -247,10 +257,10 @@ private[query] object BlockedRequests {
             case Both(l, r) => loop(Both(Then(l, right), Then(r, right)), stack, parallel, sequential)
             case o          => loop(o, stack, parallel, right :: sequential)
           }
-        case Both(left, right) => loop(left, right :: stack, parallel, sequential)
         case Single(dataSource, request) =>
-          if (stack.isEmpty) (parallel ++ Parallel(dataSource, request), sequential)
-          else loop(stack.head, stack.tail, parallel ++ Parallel(dataSource, request), sequential)
+          if (stack.isEmpty) (parallel.add(dataSource, request), sequential)
+          else loop(stack.head, stack.tail, parallel.add(dataSource, request), sequential)
+        case Both(left, right) => loop(left, right :: stack, parallel, sequential)
       }
 
     loop(c, List.empty, Parallel.empty, List.empty)

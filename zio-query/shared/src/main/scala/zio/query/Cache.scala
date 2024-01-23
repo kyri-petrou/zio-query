@@ -19,6 +19,8 @@ package zio.query
 import zio._
 import zio.stacktracer.TracingImplicits.disableAutoTrace
 
+import java.util.concurrent.ConcurrentHashMap
+
 /**
  * A `Cache` maintains an internal state with a mapping from requests to
  * `Promise`s that will contain the result of those requests when they are
@@ -52,6 +54,13 @@ trait Cache {
   def put[E, A](request: Request[E, A], result: Promise[E, A])(implicit trace: Trace): UIO[Unit]
 
   /**
+   * Inserts a request and a `Promise` that will contain the result of the
+   * request when it is executed into the cache if entry does not already exist
+   * in the cache
+   */
+  def exists[E, A](request: Request[E, A]): Boolean
+
+  /**
    * Removes a request from the cache.
    */
   def remove[E, A](request: Request[E, A])(implicit trace: Trace): UIO[Unit]
@@ -65,31 +74,42 @@ object Cache {
   def empty(implicit trace: Trace): UIO[Cache] =
     ZIO.succeed(Cache.unsafeMake())
 
-  private final class Default(private val state: Ref[Map[Request[_, _], Promise[_, _]]]) extends Cache {
+  def empty(initialSize: Int)(implicit trace: Trace): UIO[Cache] =
+    ZIO.succeed(Cache.unsafeMake(initialSize))
 
-    def get[E, A](request: Request[E, A])(implicit trace: Trace): IO[Unit, Promise[E, A]] =
-      state.get.map(_.get(request).asInstanceOf[Option[Promise[E, A]]]).some.orElseFail(())
+  private final class Default(private val map: ConcurrentHashMap[Request[_, _], Promise[_, _]]) extends Cache {
+
+    def get[E, A](request: Request[E, A])(implicit trace: Trace): IO[Unit, Promise[E, A]] = {
+      val out = map.get(request).asInstanceOf[Promise[E, A]]
+      if (out eq null) Exit.fail(())
+      else Exit.succeed(out)
+    }
 
     def lookup[R, E, A, B](request: A)(implicit
       ev: A <:< Request[E, B],
       trace: Trace
     ): UIO[Either[Promise[E, B], Promise[E, B]]] =
-      Promise.make[E, B].flatMap { promise =>
-        state.modify { map =>
-          map.get(request) match {
-            case Some(promise) => (Right(promise.asInstanceOf[Promise[E, B]]), map)
-            case None          => (Left(promise), map + (ev(request) -> promise))
-          }
-        }
+      Promise.make[E, B].map { promise =>
+        val out = map.putIfAbsent(request, promise).asInstanceOf[Promise[E, B]]
+        if (out eq null) Left(promise) else Right(out)
       }
 
     def put[E, A](request: Request[E, A], result: Promise[E, A])(implicit trace: Trace): UIO[Unit] =
-      state.update(_ + (request -> result))
+      ZIO.succeed {
+        val _ = map.put(request, result)
+        ()
+      }
+
+    def exists[E, A](request: Request[E, A]): Boolean =
+      map.containsKey(request)
 
     def remove[E, A](request: Request[E, A])(implicit trace: Trace): UIO[Unit] =
-      state.update(_ - request)
+      ZIO.succeed {
+        val _ = map.remove(request)
+        ()
+      }
   }
 
-  private[query] def unsafeMake(): Cache =
-    new Default(Ref.unsafe.make(Map.empty[Request[_, _], Promise[_, _]])(Unsafe.unsafe))
+  private[query] def unsafeMake(initialSize: Int = 1024): Cache =
+    new Default(new ConcurrentHashMap(initialSize))
 }
