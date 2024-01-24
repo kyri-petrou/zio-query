@@ -85,36 +85,27 @@ object CompletedRequestMap {
    * An empty completed requests map.
    */
   val empty: CompletedRequestMap =
-    new CompletedRequestMap(mutable.HashMap.empty)
+    new CompletedRequestMap(Map.empty)
 
   /**
-   * Constructs a completed requests map from an existing Iterable of tuples
+   * Constructs a completed requests map from the specified results.
    */
-  def from[E, A, B](it: Iterable[(A, Exit[E, B])])(implicit ev: A <:< Request[E, B]): CompletedRequestMap =
-    new CompletedRequestMap(mutable.HashMap.from[Any, Exit[?, ?]](it))
+  def fromIterable[E, A](iterable: Iterable[(Request[E, A], Exit[E, A])]): CompletedRequestMap =
+    new CompletedRequestMap(iterable.toMap)
 
-  private[query] def fromOptional[E, A, B](
-    it: Iterable[(A, Exit[E, Option[B]])]
-  )(implicit ev: A <:< Request[E, B]): CompletedRequestMap = {
-    val builder = new mutable.HashMap[Any, Exit[?, ?]]
-    builder.sizeHint(it.size)
-
-    val iter = it.iterator
-    while (iter.hasNext) {
-      val (key, exit) = iter.next()
-      exit match {
-        case Exit.Failure(e)       => builder += ((key, Exit.failCause(e)))
-        case Exit.Success(Some(a)) => builder += ((key, Exit.succeed(a)))
+  /**
+   * Constructs a completed requests map from the specified optional results.
+   */
+  def fromIterableOption[E, A](iterable: Iterable[(Request[E, A], Exit[E, Option[A]])]): CompletedRequestMap = {
+    val builder = Map.newBuilder[Any, Exit[Any, Any]]
+    builder.sizeHint(iterable.size)
+    iterable.foreach { case (request, result) =>
+      result match {
+        case Exit.Failure(e)       => builder += (request -> Exit.failCause(e))
+        case Exit.Success(Some(a)) => builder += (request -> Exit.succeed(a))
         case Exit.Success(None)    => ()
       }
     }
     new CompletedRequestMap(builder.result())
   }
-
-  // Only used by Scala 2.12 where the `Map.from` method doesn't exist
-  private implicit class EnrichedMapOps[E, A, B](val map: mutable.HashMap.type) extends AnyVal {
-    def from[K, V](it: Iterable[(K, V)]): mutable.HashMap[K, V] =
-      (mutable.HashMap.newBuilder[K, V] ++= it).result
-  }
-
 }
