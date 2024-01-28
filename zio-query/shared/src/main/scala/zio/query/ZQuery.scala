@@ -1328,37 +1328,14 @@ object ZQuery {
     request0: => A
   )(dataSource0: => DataSource[R, A])(implicit ev: A <:< Request[E, B], trace: Trace): ZQuery[R, E, B] =
     ZQuery {
-      ZIO.suspendSucceed {
-        val request    = request0
-        val dataSource = dataSource0
+      ZIO.fiberIdWith { fiberId =>
         ZQuery.cachingEnabled.get.flatMap { cachingEnabled =>
+          val request    = request0
+          val dataSource = dataSource0
           if (cachingEnabled) {
-            ZQuery.currentCache.get.flatMap { cache =>
-              cache.lookup(request).flatMap {
-                case Left(promise) =>
-                  ZIO.succeed(
-                    Result.blocked(
-                      BlockedRequests.single(dataSource, BlockedRequest(request, promise)),
-                      Continue(request, dataSource, promise)
-                    )
-                  )
-                case Right(promise) =>
-                  promise.poll.flatMap {
-                    case None =>
-                      ZIO.succeed(Result.blocked(BlockedRequests.empty, Continue(request, dataSource, promise)))
-                    case Some(io) =>
-                      io.exit.map(Result.fromExit)
-                  }
-              }
-            }
-          } else {
-            Promise.make[E, B].map { promise =>
-              Result.blocked(
-                BlockedRequests.single(dataSource, BlockedRequest(request, promise)),
-                Continue(request, dataSource, promise)
-              )
-            }
-          }
+            ZQuery.currentCache.get.flatMap(cachedResult(_, fiberId, dataSource, request))
+          } else
+            uncachedResult(fiberId, dataSource, request)
         }
       }
     }
@@ -1371,6 +1348,104 @@ object ZQuery {
     request: => A
   )(dataSource: => DataSource[R, A])(implicit ev: A <:< Request[E, B], trace: Trace): ZQuery[R, E, B] =
     fromRequest(request)(dataSource).uncached
+
+  def fromRequests[R, E, A <: Request[E, B], B, Collection[+x] <: Iterable[x]](
+    requests: => Collection[A]
+  )(
+    dataSource0: => DataSource[R, A]
+  )(implicit
+    bf0: BuildFrom[Collection[ZQuery[R, E, B]], B, Collection[B]],
+    bf1: BuildFrom[Collection[A], ZQuery[R, E, B], Collection[ZQuery[R, E, B]]],
+    trace: Trace
+  ): ZQuery[R, E, Collection[B]] =
+    fromRequests0[R, E, A, B, Collection](requests, dataSource0).flatMap(ZQuery.collectAll(_))
+
+  def fromRequestsPar[R, E, A <: Request[E, B], B, Collection[+x] <: Iterable[x]](
+    requests: => Collection[A]
+  )(
+    dataSource0: => DataSource[R, A]
+  )(implicit
+    bf0: BuildFrom[Collection[ZQuery[R, E, B]], B, Collection[B]],
+    bf1: BuildFrom[Collection[A], ZQuery[R, E, B], Collection[ZQuery[R, E, B]]],
+    trace: Trace
+  ): ZQuery[R, E, Collection[B]] =
+    fromRequests0[R, E, A, B, Collection](requests, dataSource0).flatMap(ZQuery.collectAllPar(_))
+
+  def fromRequestsBatched[R, E, A <: Request[E, B], B, Collection[+x] <: Iterable[x]](
+    requests: => Collection[A]
+  )(
+    dataSource0: => DataSource[R, A]
+  )(implicit
+    bf0: BuildFrom[Collection[ZQuery[R, E, B]], B, Collection[B]],
+    bf1: BuildFrom[Collection[A], ZQuery[R, E, B], Collection[ZQuery[R, E, B]]],
+    trace: Trace
+  ): ZQuery[R, E, Collection[B]] =
+    fromRequests0[R, E, A, B, Collection](requests, dataSource0).flatMap(ZQuery.collectAllBatched(_))
+
+  private def fromRequests0[R, E, A <: Request[E, B], B, Collection[+x] <: Iterable[x]](
+    requests0: => Collection[A],
+    dataSource0: => DataSource[R, A]
+  )(implicit
+    bf: BuildFrom[Collection[A], ZQuery[R, E, B], Collection[ZQuery[R, E, B]]],
+    trace: Trace
+  ): ZQuery[Any, Nothing, Collection[ZQuery[R, E, B]]] =
+    ZQuery {
+      ZIO.fiberId.flatMap { fiberId =>
+        ZQuery.cachingEnabled.get.flatMap { cachingEnabled =>
+          val requests   = requests0
+          val dataSource = dataSource0
+          if (cachingEnabled) {
+            ZQuery.currentCache.get.map { cache =>
+              val res = requests.map(r => ZQuery(cachedResult(cache, fiberId, dataSource, r)))
+              Result.done(bf.fromSpecific(requests)(res))
+            }
+          } else {
+            ZIO.succeed {
+              val res = requests.map(r => ZQuery(uncachedResult(fiberId, dataSource, r)))
+              Result.done(bf.fromSpecific(requests)(res))
+            }
+          }
+        }
+      }
+    }
+
+  private def cachedResult[R, E, A, B](
+    cache: Cache,
+    fiberId: FiberId,
+    dataSource: DataSource[R, A],
+    request: A
+  )(implicit
+    ev: A <:< Request[E, B],
+    trace: Trace
+  ): UIO[Result[R, E, B]] =
+    cache.lookup(request, fiberId).flatMap {
+      case Left(promise) =>
+        ZIO.succeed(
+          Result.blocked(
+            BlockedRequests.single(dataSource, BlockedRequest(request, promise)),
+            Continue(request, dataSource, promise)
+          )
+        )
+      case Right(promise) =>
+        promise.poll.flatMap {
+          case None =>
+            ZIO.succeed(Result.blocked(BlockedRequests.empty, Continue(request, dataSource, promise)))
+          case Some(io) =>
+            io.exit.map(Result.fromExit)
+        }
+    }
+
+  private def uncachedResult[R, E, A, B](fiberId: FiberId, dataSource: DataSource[R, A], request: A)(implicit
+    ev: A <:< Request[E, B],
+    trace: Trace
+  ): UIO[Result[R, E, B]] =
+    ZIO.succeed {
+      val promise = Promise.unsafe.make[E, B](fiberId)(Unsafe.unsafe)
+      Result.blocked(
+        BlockedRequests.single(dataSource, BlockedRequest(request, promise)),
+        Continue(request, dataSource, promise)
+      )
+    }
 
   /**
    * Constructs a query from an effect.

@@ -19,7 +19,7 @@ package zio.query.internal
 import zio.query.internal.BlockedRequests._
 import zio.query.{Cache, CompletedRequestMap, DataSource, DataSourceAspect, Described, QueryFailure, Request, ZQuery}
 import zio.stacktracer.TracingImplicits.disableAutoTrace
-import zio.{Chunk, Exit, Promise, Trace, ZEnvironment, ZIO}
+import zio.{Chunk, ChunkBuilder, Exit, IO, Promise, Trace, UIO, Unsafe, ZEnvironment, ZIO}
 
 import scala.annotation.tailrec
 
@@ -101,48 +101,63 @@ private[query] sealed trait BlockedRequests[-R] { self =>
    * Executes all requests, submitting requests to each data source in parallel.
    */
   def run(implicit trace: Trace): ZIO[R, Nothing, Unit] =
-    ZQuery.currentCache.get.flatMap { cache =>
-      ZIO.foreachDiscard(BlockedRequests.flatten(self)) { requestsByDataSource =>
-        ZIO.foreachParDiscard(requestsByDataSource.toIterable) { case (dataSource, sequential) =>
-          val requests = sequential.map(_.map(_.request))
-          for {
-            completedRequests <- dataSource.runAll(requests).catchAllCause { cause =>
-                                   ZIO.succeed {
-                                     requests.view.flatten.foldLeft(CompletedRequestMap.empty) { case (map, request) =>
-                                       map.insert(request, Exit.failCause(cause))
-                                     }
-                                   }
-                                 }
-            isCachingEnabled <- ZQuery.cachingEnabled.get
-            blocked           = sequential.flatten
-            _ <- if (isCachingEnabled) {
-                   ZIO.foreachDiscard(blocked) { blockedRequest =>
-                     blockedRequest.result.done(
-                       completedRequests
-                         .remove(blockedRequest.request)
-                         .getOrElse(Exit.die(QueryFailure(dataSource, blockedRequest.request)))
-                     )
-                   } *> ZIO.foreachDiscard[R, Nothing, (Request[_, _], Exit[Any, Any])](completedRequests.toList) {
-                     case (request, response) =>
-                       Promise
-                         .make[Any, Any]
-                         .tap(_.done(response))
-                         .flatMap(cache.put(request.asInstanceOf[Request[Any, Any]], _))
+    ZQuery.cachingEnabled.get.flatMap { isCachingEnabled =>
+      ZQuery.currentCache.get.flatMap { cache =>
+        ZIO.foreachDiscard(BlockedRequests.flatten(self)) { requestsByDataSource =>
+          ZIO.foreachParDiscard(requestsByDataSource.toIterable) { case (dataSource, sequential) =>
+            val requests = sequential.map(_.map(_.request))
+            for {
+              completedRequests <-
+                dataSource.runAll(requests).catchAllCause { cause =>
+                  ZIO.succeed {
+                    CompletedRequestMap.fromIterable[Any, Any](
+                      requests.view.flatten.map(v =>
+                        (v -> Exit.failCause(cause))
+                          .asInstanceOf[(Request[Any, Any], Exit[Any, Any])]
+                      )
+                    )
+                  }
+                }
+              _ <-
+                ZIO.succeed {
+                  val getRequest =
+                    if (isCachingEnabled)
+                      (br: BlockedRequest[Any]) => completedRequests.remove(br.request)
+                    else
+                      (br: BlockedRequest[Any]) => completedRequests.lookup(br.request)
+
+                  val iter0 = sequential.iterator
+                  while (iter0.hasNext) {
+                    val iter1 = iter0.next().iterator
+                    while (iter1.hasNext) {
+                      val br = iter1.next()
+                      br.result.unsafe.done(
+                        getRequest(br) match {
+                          case Some(exit) => exit.asInstanceOf[Exit[br.Failure, br.Success]]
+                          case None       => Exit.die(QueryFailure(dataSource, br.request))
+                        }
+                      )(Unsafe.unsafe)
+                    }
+                  }
+                }
+              _ <- ZIO.when(completedRequests.nonEmpty && isCachingEnabled) {
+                     ZIO.fiberId.map { fiberId =>
+                       val iter = completedRequests.iterator
+                       ZIO.whileLoop(iter.hasNext) {
+                         Promise.makeAs[Any, Any](fiberId).flatMap { promise =>
+                           val (request, response) = iter.next()
+                           promise.unsafe.done(response)(Unsafe.unsafe)
+                           cache.put(request.asInstanceOf[Request[Any, Any]], promise)
+                         }
+                       }(_ => ())
+                     }
                    }
-                 } else {
-                   // If caching is disabled there's no deduplication, so we can't remove the requests from the CompletedRequestsMap
-                   ZIO.foreachDiscard(blocked) { blockedRequest =>
-                     blockedRequest.result.done(
-                       completedRequests
-                         .lookup(blockedRequest.request)
-                         .getOrElse(Exit.die(QueryFailure(dataSource, blockedRequest.request)))
-                     )
-                   }
-                 }
-          } yield ()
+            } yield ()
+          }
         }
       }
     }
+
 }
 
 private[query] object BlockedRequests {

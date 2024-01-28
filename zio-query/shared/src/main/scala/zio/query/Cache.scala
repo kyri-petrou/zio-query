@@ -42,7 +42,7 @@ trait Cache {
    * the request is in the cache returns a `Right` with a `Promise` that will
    * contain the result of the request when it is executed.
    */
-  def lookup[R, E, A, B](request: A)(implicit
+  def lookup[E, A, B](request: A, fiberId: FiberId)(implicit
     ev: A <:< Request[E, B],
     trace: Trace
   ): UIO[Either[Promise[E, B], Promise[E, B]]]
@@ -85,12 +85,13 @@ object Cache {
       else Exit.succeed(out)
     }
 
-    def lookup[R, E, A, B](request: A)(implicit
+    def lookup[E, A, B](request: A, fiberId: FiberId)(implicit
       ev: A <:< Request[E, B],
       trace: Trace
     ): UIO[Either[Promise[E, B], Promise[E, B]]] =
-      Promise.make[E, B].map { promise =>
-        val out = map.putIfAbsent(request, promise).asInstanceOf[Promise[E, B]]
+      ZIO.succeed {
+        val promise = Promise.unsafe.make[E, B](fiberId)(Unsafe.unsafe)
+        val out     = map.putIfAbsent(request, promise).asInstanceOf[Promise[E, B]]
         if (out eq null) Left(promise) else Right(out)
       }
 

@@ -42,11 +42,22 @@ class CollectAllBenchmark {
   }
 
   @Benchmark
-  def zQueryCollectAllFromRequestBatched(): Long = {
+  def zQueryCollectAllRequestsBatched(): Long = {
     val queries = (0 until count).map(i => ZQuery.fromRequest(Req(i))(ds)).toList
     val query   = ZQuery.collectAllBatched(queries).map(_.sum.toLong)
     unsafeRun(query)
   }
+
+  @Benchmark
+  def zQueryFromRequestsBatched(): Long = {
+    val reqs = (0 until count).map(Req(_)).toList
+    val query: ZQuery[Any, Nothing, Long] =
+      ZQuery.fromRequestsBatched[Any, Nothing, Req, Int, List](reqs)(ds).map(_.sum.toLong)
+    unsafeRun(query)
+  }
+
+  private case class Req(i: Int) extends Request[Nothing, Int]
+  private val ds = DataSource.fromFunctionBatchedZIO("Datasource") { reqs: Chunk[Req] => ZIO.succeed(reqs.map(_.i)) }
 
   @Benchmark
   def zQueryCollectAllPar(): Long = {
@@ -62,6 +73,4 @@ class CollectAllBenchmark {
     unsafeRun(query)
   }
 
-  private case class Req(i: Int) extends Request[Nothing, Int]
-  private val ds = DataSource.fromFunctionBatchedZIO("Datasource") { reqs: Chunk[Req] => ZIO.succeed(reqs.map(_.i)) }
 }
