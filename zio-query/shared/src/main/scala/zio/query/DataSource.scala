@@ -107,13 +107,15 @@ trait DataSource[-R, -A] { self =>
   )(f: Described[C => Either[A, B]]): DataSource[R1, C] =
     new DataSource[R1, C] {
       val identifier = s"${self.identifier}.eitherWith(${that.identifier})(${f.description})"
-      def runAll(requests: Chunk[Chunk[C]])(implicit trace: Trace): ZIO[R1, Nothing, CompletedRequestMap] =
+      def runAll(requests: Chunk[Chunk[C]])(implicit trace: Trace): ZIO[R1, Nothing, CompletedRequestMap] = {
+        val sizeHint = requests.foldLeft(0)(_ + _.length)
         ZIO
           .foreach(requests) { requests =>
             val (as, bs) = requests.partitionMap(f.value)
             self.runAll(Chunk(as)).zipWithPar(that.runAll(Chunk(bs)))(_ ++ _)
           }
-          .map(_.foldLeft(CompletedRequestMap.empty)(_ ++ _))
+          .map(_.foldLeft(CompletedRequestMap.empty(sizeHint))(_ ++ _))
+      }
 
     }
 
@@ -173,7 +175,8 @@ object DataSource {
       requests match {
         case Chunk(single) => run(single)
         case _ =>
-          ZIO.foldLeft(requests)(CompletedRequestMap.empty) { case (completedRequestMap, requests) =>
+          val sizeHint = requests.foldLeft(0)(_ + _.length)
+          ZIO.foldLeft(requests)(CompletedRequestMap.empty(sizeHint)) { case (completedRequestMap, requests) =>
             val newRequests = requests.filterNot(completedRequestMap.contains)
             if (newRequests.isEmpty) ZIO.succeed(completedRequestMap)
             else run(newRequests).map(completedRequestMap ++ _)

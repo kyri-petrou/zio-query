@@ -101,59 +101,58 @@ private[query] sealed trait BlockedRequests[-R] { self =>
    * Executes all requests, submitting requests to each data source in parallel.
    */
   def run(implicit trace: Trace): ZIO[R, Nothing, Unit] =
-    ZQuery.cachingEnabled.get.flatMap { isCachingEnabled =>
-      ZQuery.currentCache.get.flatMap { cache =>
-        ZIO.foreachDiscard(BlockedRequests.flatten(self)) { requestsByDataSource =>
-          ZIO.foreachParDiscard(requestsByDataSource.toIterable) { case (dataSource, sequential) =>
-            val requests = sequential.map(_.map(_.request))
-            for {
-              completedRequests <-
-                dataSource.runAll(requests).catchAllCause { cause =>
-                  ZIO.succeed {
-                    CompletedRequestMap.fromIterable[Any, Any](
-                      requests.view.flatten.map(v =>
-                        (v -> Exit.failCause(cause))
-                          .asInstanceOf[(Request[Any, Any], Exit[Any, Any])]
-                      )
-                    )
-                  }
-                }
-              _ <-
+    ZQuery.currentCache.get.flatMap { cache =>
+      ZIO.foreachDiscard(BlockedRequests.flatten(self)) { requestsByDataSource =>
+        ZIO.foreachParDiscard(requestsByDataSource.toIterable) { case (dataSource, sequential) =>
+          val requests = sequential.map(_.map(_.request))
+          for {
+            completedRequests <-
+              dataSource.runAll(requests).catchAllCause { cause =>
                 ZIO.succeed {
-                  val getRequest =
-                    if (isCachingEnabled)
-                      (br: BlockedRequest[Any]) => completedRequests.remove(br.request)
-                    else
-                      (br: BlockedRequest[Any]) => completedRequests.lookup(br.request)
+                  CompletedRequestMap.fromIterable[Any, Any](
+                    requests.view.flatten.map(v =>
+                      (v -> Exit.failCause(cause))
+                        .asInstanceOf[(Request[Any, Any], Exit[Any, Any])]
+                    )
+                  )
+                }
+              }
+            isCachingEnabled <- ZQuery.cachingEnabled.get
+            _ <-
+              ZIO.succeed {
+                val getRequest =
+                  if (isCachingEnabled)
+                    (br: BlockedRequest[Any]) => completedRequests.remove(br.request)
+                  else
+                    (br: BlockedRequest[Any]) => completedRequests.lookup(br.request)
 
-                  val iter0 = sequential.iterator
-                  while (iter0.hasNext) {
-                    val iter1 = iter0.next().iterator
-                    while (iter1.hasNext) {
-                      val br = iter1.next()
-                      br.result.unsafe.done(
-                        getRequest(br) match {
-                          case Some(exit) => exit.asInstanceOf[Exit[br.Failure, br.Success]]
-                          case None       => Exit.die(QueryFailure(dataSource, br.request))
-                        }
-                      )(Unsafe.unsafe)
-                    }
+                val iter0 = sequential.iterator
+                while (iter0.hasNext) {
+                  val iter1 = iter0.next().iterator
+                  while (iter1.hasNext) {
+                    val br = iter1.next()
+                    br.result.unsafe.done(
+                      getRequest(br) match {
+                        case Some(exit) => exit.asInstanceOf[Exit[br.Failure, br.Success]]
+                        case None       => Exit.die(QueryFailure(dataSource, br.request))
+                      }
+                    )(Unsafe.unsafe)
                   }
                 }
-              _ <- ZIO.when(completedRequests.nonEmpty && isCachingEnabled) {
-                     ZIO.fiberId.map { fiberId =>
-                       val iter = completedRequests.iterator
-                       ZIO.whileLoop(iter.hasNext) {
-                         Promise.makeAs[Any, Any](fiberId).flatMap { promise =>
-                           val (request, response) = iter.next()
-                           promise.unsafe.done(response)(Unsafe.unsafe)
-                           cache.put(request.asInstanceOf[Request[Any, Any]], promise)
-                         }
-                       }(_ => ())
-                     }
+              }
+            _ <- ZIO.when(completedRequests.nonEmpty && isCachingEnabled) {
+                   ZIO.fiberId.map { fiberId =>
+                     val iter = completedRequests.iterator
+                     ZIO.whileLoop(iter.hasNext) {
+                       Promise.makeAs[Any, Any](fiberId).flatMap { promise =>
+                         val (request, response) = iter.next()
+                         promise.unsafe.done(response)(Unsafe.unsafe)
+                         cache.put(request.asInstanceOf[Request[Any, Any]], promise)
+                       }
+                     }(_ => ())
                    }
-            } yield ()
-          }
+                 }
+          } yield ()
         }
       }
     }

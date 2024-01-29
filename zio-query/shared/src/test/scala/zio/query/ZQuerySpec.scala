@@ -200,6 +200,32 @@ object ZQuerySpec extends ZIOBaseSpec {
           log <- TestConsole.output
         } yield assert(log)(hasSize(equalTo(2)))
       },
+      suite("fromRequests")(
+        test("sequential") {
+          for {
+            result <- getSequential(List(3, 4, 3)).run
+          } yield assert(result)(equalTo(List("c", "d", "c")))
+        },
+        test("parallel") {
+          for {
+            result <- getPar(List(3, 4, 3)).run
+          } yield assert(result)(equalTo(List("c", "d", "c")))
+        },
+        test("batched") {
+          for {
+            result <- getBatched(List(3, 4, 3)).run
+          } yield assert(result)(equalTo(List("c", "d", "c")))
+        },
+        test("data sources can return additional results") {
+          val getSome = getPar(List(3, 4)).map(_.toSet)
+          val query   = getAll *> getSome
+          for {
+            result <- query.run
+            output <- TestConsole.output
+          } yield assert(result)(equalTo(Set("c", "d"))) &&
+            assert(output)(equalTo(Vector("getAll called\n")))
+        }
+      ),
       suite("timeout")(
         test("times out a query that does not complete") {
           for {
@@ -557,4 +583,11 @@ object ZQuerySpec extends ZIOBaseSpec {
     ZQuery.fromRequest(Req.GetAll)(ds)
   def get(id: Int): ZQuery[Any, DataSourceErrors, String] =
     ZQuery.fromRequest(Req.Get(id))(ds)
+
+  def getSequential(ids: List[Int]): ZQuery[Any, DataSourceErrors, List[String]] =
+    ZQuery.fromRequestsBatched[Any, DataSourceErrors, Req.Get, String, List](ids.map(Req.Get.apply))(ds)
+  def getPar(ids: List[Int]): ZQuery[Any, DataSourceErrors, List[String]] =
+    ZQuery.fromRequestsBatched[Any, DataSourceErrors, Req.Get, String, List](ids.map(Req.Get.apply))(ds)
+  def getBatched(ids: List[Int]): ZQuery[Any, DataSourceErrors, List[String]] =
+    ZQuery.fromRequestsBatched[Any, DataSourceErrors, Req.Get, String, List](ids.map(Req.Get.apply))(ds)
 }

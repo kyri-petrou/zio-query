@@ -1323,6 +1323,9 @@ object ZQuery {
    * a `QueryFailure` when run if the data source does not provide results for
    * all requests received. Queries must be constructed with `fromRequest` or
    * one of its variants for optimizations to be applied.
+   *
+   * @see
+   *   [[fromRequests]], [[fromRequestsPar]] and [[fromRequestsBatched]]
    */
   def fromRequest[R, E, A, B](
     request0: => A
@@ -1341,14 +1344,15 @@ object ZQuery {
     }
 
   /**
-   * Constructs a query from a request and a data source but does not apply
-   * caching to the query.
+   * Constructs a query from a collection of requests and a data source,
+   * executing them sequentially.
+   *
+   * This method is the optimized equivalent of the code below for cases that
+   * multiple requests are dispatched to the same datasource:
+   * {{{
+   *  ZQuery.foreach(requests)(ZQuery.fromRequest(_)(datasource))
+   * }}}
    */
-  def fromRequestUncached[R, E, A, B](
-    request: => A
-  )(dataSource: => DataSource[R, A])(implicit ev: A <:< Request[E, B], trace: Trace): ZQuery[R, E, B] =
-    fromRequest(request)(dataSource).uncached
-
   def fromRequests[R, E, A <: Request[E, B], B, Collection[+x] <: Iterable[x]](
     requests: => Collection[A]
   )(
@@ -1360,17 +1364,16 @@ object ZQuery {
   ): ZQuery[R, E, Collection[B]] =
     fromRequests0[R, E, A, B, Collection](requests, dataSource0).flatMap(ZQuery.collectAll(_))
 
-  def fromRequestsPar[R, E, A <: Request[E, B], B, Collection[+x] <: Iterable[x]](
-    requests: => Collection[A]
-  )(
-    dataSource0: => DataSource[R, A]
-  )(implicit
-    bf0: BuildFrom[Collection[ZQuery[R, E, B]], B, Collection[B]],
-    bf1: BuildFrom[Collection[A], ZQuery[R, E, B], Collection[ZQuery[R, E, B]]],
-    trace: Trace
-  ): ZQuery[R, E, Collection[B]] =
-    fromRequests0[R, E, A, B, Collection](requests, dataSource0).flatMap(ZQuery.collectAllPar(_))
-
+  /**
+   * Constructs a query from a collection of requests and batching them to a
+   * data source.
+   *
+   * This method is the optimized equivalent of the code below for cases that
+   * multiple requests are dispatched to the same datasource:
+   * {{{
+   *  ZQuery.foreachBatched(requests)(ZQuery.fromRequest(_)(datasource))
+   * }}}
+   */
   def fromRequestsBatched[R, E, A <: Request[E, B], B, Collection[+x] <: Iterable[x]](
     requests: => Collection[A]
   )(
@@ -1381,6 +1384,27 @@ object ZQuery {
     trace: Trace
   ): ZQuery[R, E, Collection[B]] =
     fromRequests0[R, E, A, B, Collection](requests, dataSource0).flatMap(ZQuery.collectAllBatched(_))
+
+  /**
+   * Constructs a query from a collection of requests and a data source,
+   * executing them in parallel.
+   *
+   * This method is the optimized equivalent of the code below for cases that
+   * multiple requests are dispatched to the same datasource:
+   * {{{
+   *  ZQuery.foreachPar(requests)(ZQuery.fromRequest(_)(datasource))
+   * }}}
+   */
+  def fromRequestsPar[R, E, A <: Request[E, B], B, Collection[+x] <: Iterable[x]](
+    requests: => Collection[A]
+  )(
+    dataSource0: => DataSource[R, A]
+  )(implicit
+    bf0: BuildFrom[Collection[ZQuery[R, E, B]], B, Collection[B]],
+    bf1: BuildFrom[Collection[A], ZQuery[R, E, B], Collection[ZQuery[R, E, B]]],
+    trace: Trace
+  ): ZQuery[R, E, Collection[B]] =
+    fromRequests0[R, E, A, B, Collection](requests, dataSource0).flatMap(ZQuery.collectAllPar(_))
 
   private def fromRequests0[R, E, A <: Request[E, B], B, Collection[+x] <: Iterable[x]](
     requests0: => Collection[A],
@@ -1446,6 +1470,15 @@ object ZQuery {
         Continue(request, dataSource, promise)
       )
     }
+
+  /**
+   * Constructs a query from a request and a data source but does not apply
+   * caching to the query.
+   */
+  def fromRequestUncached[R, E, A, B](
+    request: => A
+  )(dataSource: => DataSource[R, A])(implicit ev: A <:< Request[E, B], trace: Trace): ZQuery[R, E, B] =
+    fromRequest(request)(dataSource).uncached
 
   /**
    * Constructs a query from an effect.

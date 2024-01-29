@@ -92,6 +92,17 @@ object CompletedRequestMap {
     new CompletedRequestMap(mutable.HashMap.empty)
 
   /**
+   * An empty completed requests map sized to accommodate for the specified
+   * number of requests without having to dynamically resize
+   */
+  def empty(sizeHint: Int): CompletedRequestMap =
+    new CompletedRequestMap({
+      val map = mutable.HashMap.empty[Any, Exit[Any, Any]]
+      map.sizeHint(sizeHint)
+      map
+    })
+
+  /**
    * Constructs a completed requests map from the specified results.
    */
   def fromIterable[E, A](iterable: Iterable[(Request[E, A], Exit[E, A])]): CompletedRequestMap = {
@@ -113,6 +124,6 @@ object CompletedRequestMap {
         case Exit.Success(None)    => ()
       }
     }
-    new CompletedRequestMap(map.result())
+    new CompletedRequestMap(map)
   }
 }
