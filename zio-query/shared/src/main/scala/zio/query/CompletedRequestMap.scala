@@ -19,6 +19,9 @@ package zio.query
 import zio.Exit
 import zio.stacktracer.TracingImplicits.disableAutoTrace
 
+import scala.collection.immutable.HashMap
+import scala.collection.mutable
+
 /**
  * A `CompletedRequestMap` is a universally quantified mapping from requests of
  * type `Request[E, A]` to results of type `Exit[E, A]` for all types `E` and
@@ -28,7 +31,7 @@ import zio.stacktracer.TracingImplicits.disableAutoTrace
  * types for different requests while guaranteeing that results will be of the
  * type requested.
  */
-final class CompletedRequestMap private (private val map: Map[Any, Exit[Any, Any]]) { self =>
+final class CompletedRequestMap private (private val map: HashMap[Any, Exit[Any, Any]]) { self =>
 
   def ++(that: CompletedRequestMap): CompletedRequestMap =
     new CompletedRequestMap(self.map ++ that.map)
@@ -73,6 +76,12 @@ final class CompletedRequestMap private (private val map: Map[Any, Exit[Any, Any
   def isEmpty: Boolean =
     map.isEmpty
 
+  private[query] def toMutableMap: mutable.HashMap[Request[?, ?], Exit[Any, Any]] = {
+    val map0 = new mutable.HashMap[Request[?, ?], Exit[Any, Any]]()
+    map0.sizeHint(map.size)
+    map0 ++= map.asInstanceOf[HashMap[Request[?, ?], Exit[Any, Any]]]
+  }
+
   override def toString: String =
     s"CompletedRequestMap(${map.mkString(", ")})"
 }
@@ -83,26 +92,26 @@ object CompletedRequestMap {
    * An empty completed requests map.
    */
   val empty: CompletedRequestMap =
-    new CompletedRequestMap(Map.empty)
+    new CompletedRequestMap(HashMap.empty)
 
   /**
    * Constructs a completed requests map from the specified results.
    */
-  def fromIterable[E, A](iterable: Iterable[(Request[E, A], Exit[E, A])]): CompletedRequestMap =
-    new CompletedRequestMap(iterable.toMap)
+  def fromIterable[E, A](iterable: Iterable[(Request[E, A], Exit[E, A])]): CompletedRequestMap = {
+    val builder = HashMap.newBuilder[Any, Exit[Any, Any]]
+    builder ++= iterable
+    new CompletedRequestMap(builder.result())
+  }
 
   /**
    * Constructs a completed requests map from the specified optional results.
    */
   def fromIterableOption[E, A](iterable: Iterable[(Request[E, A], Exit[E, Option[A]])]): CompletedRequestMap = {
-    val builder = Map.newBuilder[Any, Exit[Any, Any]]
-    builder.sizeHint(iterable.size)
-    iterable.foreach { case (request, result) =>
-      result match {
-        case Exit.Failure(e)       => builder += (request -> Exit.failCause(e))
-        case Exit.Success(Some(a)) => builder += (request -> Exit.succeed(a))
-        case Exit.Success(None)    => ()
-      }
+    val builder = HashMap.newBuilder[Any, Exit[Any, Any]]
+    iterable.foreach {
+      case (request, Exit.Failure(e))       => builder += (request -> Exit.failCause(e))
+      case (request, Exit.Success(Some(a))) => builder += (request -> Exit.succeed(a))
+      case (_, Exit.Success(None))          => ()
     }
     new CompletedRequestMap(builder.result())
   }

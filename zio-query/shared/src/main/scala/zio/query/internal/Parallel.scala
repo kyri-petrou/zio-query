@@ -16,28 +16,24 @@
 
 package zio.query.internal
 
-import zio.Chunk
 import zio.query.DataSource
 import zio.stacktracer.TracingImplicits.disableAutoTrace
+import zio.{Chunk, ChunkBuilder}
+
+import scala.collection.mutable
 
 /**
  * A `Parallel[R]` maintains a mapping from data sources to requests from those
  * data sources that can be executed in parallel.
  */
-private[query] final class Parallel[-R](private val map: Map[DataSource[Any, Any], Chunk[BlockedRequest[Any]]]) {
-  self =>
+private[query] final class Parallel[-R](
+  private val map: mutable.HashMap[DataSource[?, ?], ChunkBuilder[BlockedRequest[Any]]]
+) { self =>
 
-  /**
-   * Combines this collection of requests that can be executed in parallel with
-   * that collection of requests that can be executed in parallel to return a
-   * new collection of requests that can be executed in parallel.
-   */
-  def ++[R1 <: R](that: Parallel[R1]): Parallel[R1] =
-    new Parallel(
-      self.map.foldLeft(that.map) { case (map, (k, v)) =>
-        map + (k -> map.get(k).fold[Chunk[BlockedRequest[Any]]](v)(_ ++ v))
-      }
-    )
+  def addOne[R1 <: R](dataSource: DataSource[R1, ?], blockedRequest: BlockedRequest[Any]): Parallel[R1] = {
+    self.map.getOrElseUpdate(dataSource, Chunk.newBuilder) addOne blockedRequest
+    self
+  }
 
   /**
    * Returns whether this collection of requests is empty.
@@ -45,42 +41,31 @@ private[query] final class Parallel[-R](private val map: Map[DataSource[Any, Any
   def isEmpty: Boolean =
     map.isEmpty
 
-  /**
-   * Returns a collection of the data sources that the requests in this
-   * collection are from.
-   */
-  def keys: Iterable[DataSource[R, Any]] =
-    map.keys
+  def head: DataSource[R, Any] =
+    map.head._1.asInstanceOf[DataSource[R, Any]]
+
+  def size: Int =
+    map.size
 
   /**
    * Converts this collection of requests that can be executed in parallel to a
    * batch of requests in a collection of requests that must be executed
    * sequentially.
    */
-  def sequential: Sequential[R] =
-    new Sequential(map.map { case (k, v) => (k, Chunk(v)) })
-
-  /**
-   * Converts this collection of requests that can be executed in parallel to an
-   * `Iterable` containing mappings from data sources to requests from those
-   * data sources.
-   */
-  def toIterable: Iterable[(DataSource[R, Any], Chunk[BlockedRequest[Any]])] =
-    map
+  def sequential: Sequential[R] = {
+    val builder = Map.newBuilder[DataSource[Any, Any], Chunk[Chunk[BlockedRequest[Any]]]]
+    map.foreach { case (dataSource, chunkBuilder) =>
+      builder += ((dataSource.asInstanceOf[DataSource[Any, Any]], Chunk.single(chunkBuilder.result())))
+    }
+    new Sequential(builder.result())
+  }
 }
 
 private[query] object Parallel {
 
   /**
-   * Constructs a new collection of requests containing a mapping from the
-   * specified data source to the specified request.
-   */
-  def apply[R, E, A](dataSource: DataSource[R, A], blockedRequest: BlockedRequest[A]): Parallel[R] =
-    new Parallel(Map(dataSource.asInstanceOf[DataSource[Any, Any]] -> Chunk(blockedRequest)))
-
-  /**
    * The empty collection of requests.
    */
-  val empty: Parallel[Any] =
-    new Parallel(Map.empty)
+  def empty[R]: Parallel[R] =
+    new Parallel(mutable.HashMap.empty)
 }

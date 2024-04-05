@@ -20,7 +20,6 @@ import zio._
 import zio.query.internal._
 import zio.stacktracer.TracingImplicits.disableAutoTrace
 
-import scala.annotation.tailrec
 import scala.collection.mutable.Builder
 import scala.reflect.ClassTag
 
@@ -1128,17 +1127,16 @@ object ZQuery {
               failBuilder += e
               index += 1
           }.as {
-            val dones         = doneBuilder.result()
-            val doneIndices   = doneIndicesBuilder.result()
-            val effects       = effectBuilder.result()
-            val effectIndices = effectIndicesBuilder.result()
-            val fails         = failBuilder.result()
-            val gets          = getBuilder.result()
-            val getIndices    = getIndicesBuilder.result()
-            if (gets.isEmpty && effects.isEmpty && fails.isEmpty)
+            val dones   = doneBuilder.result()
+            val effects = effectBuilder.result()
+            val fails   = failBuilder.result()
+            val gets    = getBuilder.result()
+            if (gets.isEmpty && effects.isEmpty && fails.isEmpty) {
               Result.done(bf.fromSpecific(as)(dones))
-            else if (fails.isEmpty) {
+            } else if (fails.isEmpty) {
               val continue = if (effects.isEmpty) {
+                val getIndices  = getIndicesBuilder.result()
+                val doneIndices = doneIndicesBuilder.result()
                 val io = ZIO.collectAll(gets).map { gets =>
                   val array              = Array.ofDim[AnyRef](index)
                   val getsIterator       = gets.iterator
@@ -1159,6 +1157,9 @@ object ZQuery {
                 }
                 Continue.get(io)
               } else {
+                val effectIndices = effectIndicesBuilder.result()
+                val getIndices    = getIndicesBuilder.result()
+                val doneIndices   = doneIndicesBuilder.result()
                 val query = ZQuery.collectAllBatched(effects).flatMap { effects =>
                   ZQuery.fromZIONow(ZIO.collectAll(gets).map { gets =>
                     val array                 = Array.ofDim[AnyRef](index)
@@ -1247,10 +1248,9 @@ object ZQuery {
     f: A => ZQuery[R, E, B]
   )(implicit bf: BuildFrom[Collection[A], B, Collection[B]], trace: Trace): ZQuery[R, E, Collection[B]] =
     ZQuery.suspend {
-      val size = as.size
-      if (size == 0)
+      if (as.isEmpty)
         ZQuery.succeed(bf.newBuilder(as).result())
-      else if (size == 1)
+      else if (isSingleElementIterable(as))
         f(as.head).map(bf.newBuilder(as) += _).map(_.result())
       else
         ZQuery(
@@ -1258,6 +1258,13 @@ object ZQuery {
             .foreachPar[R, Nothing, A, Result[R, E, B], Iterable](as)(f(_).step)
             .map(Result.collectAllPar(_).map(bf.fromSpecific(as)))
         )
+    }
+
+  private def isSingleElementIterable(iterable: Iterable[?]): Boolean =
+    iterable match {
+      case _ :: Nil   => true
+      case _: List[?] => false
+      case _          => iterable.size == 1
     }
 
   /**
@@ -1328,37 +1335,36 @@ object ZQuery {
     request0: => A
   )(dataSource0: => DataSource[R, A])(implicit ev: A <:< Request[E, B], trace: Trace): ZQuery[R, E, B] =
     ZQuery {
-      ZIO.suspendSucceed {
+      ZIO.fiberIdWith { fiberId =>
         val request    = request0
         val dataSource = dataSource0
-        ZQuery.cachingEnabled.get.flatMap { cachingEnabled =>
-          if (cachingEnabled) {
-            ZQuery.currentCache.get.flatMap { cache =>
-              cache.lookup(request).flatMap {
-                case Left(promise) =>
-                  ZIO.succeed(
-                    Result.blocked(
-                      BlockedRequests.single(dataSource, BlockedRequest(request, promise)),
-                      Continue(request, dataSource, promise)
-                    )
+        ZQuery.cachingEnabled.getWith {
+          if (_) {
+            def foldPromise(either: Either[Promise[E, B], Promise[E, B]]): UIO[Result[R, E, B]] = either match {
+              case Left(promise) =>
+                ZIO.succeed(
+                  Result.blocked(
+                    BlockedRequests.single(dataSource, BlockedRequest(request, promise)),
+                    Continue[R, E, A, B](promise)
                   )
-                case Right(promise) =>
-                  promise.poll.flatMap {
-                    case None =>
-                      ZIO.succeed(Result.blocked(BlockedRequests.empty, Continue(request, dataSource, promise)))
-                    case Some(io) =>
-                      io.exit.map(Result.fromExit)
-                  }
-              }
+                )
+              case Right(promise) =>
+                promise.poll.flatMap {
+                  case None     => ZIO.succeed(Result.blocked(BlockedRequests.empty, Continue[R, E, A, B](promise)))
+                  case Some(io) => io.exit.map(Result.fromExit)
+                }
             }
-          } else {
-            Promise.make[E, B].map { promise =>
+            ZQuery.currentCache.getWith {
+              case cache: Cache.Default => foldPromise(cache.lookupUnsafe(request, fiberId)(Unsafe.unsafe, implicitly))
+              case cache                => cache.lookup(request).flatMap(foldPromise)
+            }
+          } else
+            Promise.makeAs[E, B](fiberId).map { promise =>
               Result.blocked(
                 BlockedRequests.single(dataSource, BlockedRequest(request, promise)),
-                Continue(request, dataSource, promise)
+                Continue[R, E, A, B](promise)
               )
             }
-          }
         }
       }
     }

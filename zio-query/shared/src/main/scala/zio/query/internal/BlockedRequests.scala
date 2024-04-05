@@ -16,12 +16,14 @@
 
 package zio.query.internal
 
+import zio.query._
 import zio.query.internal.BlockedRequests._
-import zio.query.{Cache, CompletedRequestMap, DataSource, DataSourceAspect, Described, QueryFailure, Request, ZQuery}
 import zio.stacktracer.TracingImplicits.disableAutoTrace
-import zio.{Exit, Promise, Trace, ZEnvironment, ZIO}
+import zio.{Chunk, Exit, Promise, Trace, UIO, Unsafe, ZEnvironment, ZIO}
 
 import scala.annotation.tailrec
+import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
 
 /**
  * `BlockedRequests` captures a collection of blocked requests as a data
@@ -101,35 +103,38 @@ private[query] sealed trait BlockedRequests[-R] { self =>
    * Executes all requests, submitting requests to each data source in parallel.
    */
   def run(implicit trace: Trace): ZIO[R, Nothing, Unit] =
-    ZQuery.currentCache.get.flatMap { cache =>
-      ZIO.foreachDiscard(BlockedRequests.flatten(self)) { requestsByDataSource =>
+    ZQuery.currentCache.getWith { cache =>
+      val flattened = BlockedRequests.flatten(self)
+      ZIO.foreachDiscard(flattened) { requestsByDataSource =>
         ZIO.foreachParDiscard(requestsByDataSource.toIterable) { case (dataSource, sequential) =>
-          for {
-            completedRequests <- dataSource.runAll(sequential.map(_.map(_.request))).catchAllCause { cause =>
-                                   ZIO.succeed {
-                                     sequential.map(_.map(_.request)).flatten.foldLeft(CompletedRequestMap.empty) {
-                                       case (map, request) => map.insert(request, Exit.failCause(cause))
-                                     }
-                                   }
-                                 }
-            blockedRequests = sequential.flatten
-            leftovers       = completedRequests.requests -- blockedRequests.map(_.request)
-            _ <- ZIO.foreachDiscard(blockedRequests) { blockedRequest =>
-                   blockedRequest.result.done(
-                     completedRequests
-                       .lookup(blockedRequest.request)
-                       .getOrElse(Exit.die(QueryFailure(dataSource, blockedRequest.request)))
-                   )
-                 }
-            _ <- ZIO.foreachDiscard(leftovers) { request =>
-                   ZIO.foreach(completedRequests.lookup(request)) { response =>
-                     Promise
-                       .make[Any, Any]
-                       .tap(_.done(response))
-                       .flatMap(cache.put(request.asInstanceOf[Request[Any, Any]], _))
-                   }
-                 }
-          } yield ()
+          val requests = sequential.map(_.map(_.request))
+
+          dataSource
+            .runAll(requests)
+            .catchAllCause { cause =>
+              ZIO.succeed {
+                val exit = Exit.failCause(cause).asInstanceOf[Exit[Any, Any]]
+                CompletedRequestMap.fromIterable(
+                  requests.flatten.map(r => r.asInstanceOf[Request[Any, Any]] -> exit)
+                )
+              }
+            }
+            .flatMap { completedRequests =>
+              ZQuery.cachingEnabled.getWith { cachingEnabled =>
+                val completedRequestsM = completedRequests.toMutableMap
+                if (cachingEnabled) {
+                  completePromises(dataSource, sequential) { req =>
+                    // Pop the entry, and fallback to the immutable one if we already removed it
+                    completedRequestsM.remove(req) orElse completedRequests.lookup(req)
+                  }
+                  // cache responses that were not requested but were completed by the DataSource
+                  if (completedRequestsM.nonEmpty) cacheLeftovers(cache, completedRequestsM) else ZIO.unit
+                } else {
+                  // No need to remove entries here since we don't need to know which ones we need to put in the cache
+                  ZIO.succeed(completePromises(dataSource, sequential)(completedRequestsM.get))
+                }
+              }
+            }
         }
       }
     }
@@ -201,19 +206,16 @@ private[query] object BlockedRequests {
   ): List[Sequential[R]] = {
 
     @tailrec
-    def loop[R](
+    def loop(
       blockedRequests: List[BlockedRequests[R]],
       flattened: List[Sequential[R]]
     ): List[Sequential[R]] = {
-      val (parallel, sequential) =
-        blockedRequests.foldLeft[(Parallel[R], List[BlockedRequests[R]])]((Parallel.empty, List.empty)) {
-          case ((parallel, sequential), blockedRequest) =>
-            val (par, seq) = step(blockedRequest)
-            (parallel ++ par, sequential ++ seq)
-        }
+      val parallel   = Parallel.empty
+      val sequential = ListBuffer.empty[BlockedRequests[R]]
+      blockedRequests.foreach(step(parallel, sequential))
       val updated = merge(flattened, parallel)
       if (sequential.isEmpty) updated.reverse
-      else loop(sequential, updated)
+      else loop(sequential.result(), updated)
     }
 
     loop(List(blockedRequests), List.empty)
@@ -226,33 +228,34 @@ private[query] object BlockedRequests {
    * requests.
    */
   private def step[R](
-    c: BlockedRequests[R]
-  ): (Parallel[R], List[BlockedRequests[R]]) = {
+    parallel: Parallel[R],
+    sequential: ListBuffer[BlockedRequests[R]]
+  )(c: BlockedRequests[R]): Unit = {
 
     @tailrec
-    def loop[R](
+    def loop(
       blockedRequests: BlockedRequests[R],
-      stack: List[BlockedRequests[R]],
-      parallel: Parallel[R],
-      sequential: List[BlockedRequests[R]]
-    ): (Parallel[R], List[BlockedRequests[R]]) =
+      stack: List[BlockedRequests[R]]
+    ): Unit =
       blockedRequests match {
         case Empty =>
-          if (stack.isEmpty) (parallel, sequential)
-          else loop(stack.head, stack.tail, parallel, sequential)
+          if (stack ne Nil) loop(stack.head, stack.tail)
+        case Single(dataSource, request) =>
+          parallel.addOne(dataSource, request)
+          if (stack ne Nil) loop(stack.head, stack.tail)
         case Then(left, right) =>
           left match {
-            case Empty      => loop(right, stack, parallel, sequential)
-            case Then(l, r) => loop(Then(l, Then(r, right)), stack, parallel, sequential)
-            case o          => loop(o, stack, parallel, right :: sequential)
+            case Empty      => loop(right, stack)
+            case Then(l, r) => loop(Then(l, Then(r, right)), stack)
+            case o =>
+              if (right ne Empty) sequential.prepend(right)
+              loop(o, stack)
           }
-        case Both(left, right) => loop(left, right :: stack, parallel, sequential)
-        case Single(dataSource, request) =>
-          if (stack.isEmpty) (parallel ++ Parallel(dataSource, request), sequential)
-          else loop(stack.head, stack.tail, parallel ++ Parallel(dataSource, request), sequential)
+        case Both(left, right) =>
+          loop(left, right :: stack)
       }
 
-    loop(c, List.empty, Parallel.empty, List.empty)
+    loop(c, List.empty)
   }
 
   /**
@@ -263,11 +266,59 @@ private[query] object BlockedRequests {
    */
   private def merge[R](sequential: List[Sequential[R]], parallel: Parallel[R]): List[Sequential[R]] =
     if (sequential.isEmpty)
-      List(parallel.sequential)
+      parallel.sequential :: Nil
     else if (parallel.isEmpty)
       sequential
-    else if (sequential.head.keys.size == 1 && parallel.keys.size == 1 && sequential.head.keys == parallel.keys)
+    else if ({
+      val seqHead = sequential.head
+      seqHead.size == 1 && parallel.size == 1 && seqHead.head == parallel.head
+    })
       (sequential.head ++ parallel.sequential) :: sequential.tail
     else
       parallel.sequential :: sequential
+
+  private def completePromises(
+    dataSource: DataSource[_, Any],
+    sequential: Chunk[Chunk[BlockedRequest[Any]]]
+  )(get: Request[?, ?] => Option[Exit[Any, Any]]): Unit =
+    sequential.foreach {
+      _.foreach { br =>
+        val req = br.request
+        val res = get(req) match {
+          case Some(exit) => exit.asInstanceOf[Exit[br.Failure, br.Success]]
+          case None       => Exit.die(QueryFailure(dataSource, req))
+        }
+        br.result.unsafe.done(res)(Unsafe.unsafe)
+      }
+    }
+
+  private def cacheLeftovers(
+    cache: Cache,
+    map: mutable.HashMap[Request[_, _], Exit[Any, Any]]
+  )(implicit trace: Trace): UIO[Unit] =
+    ZIO.fiberIdWith { fiberId =>
+      cache match {
+        case cache: Cache.Default =>
+          ZIO.succeedUnsafe { implicit unsafe =>
+            map.foreach { case (request, exit) =>
+              val promise = Promise.unsafe.make[Any, Any](fiberId)
+              promise.unsafe.done(exit)
+              cache.putUnsafe(request.asInstanceOf[Request[Any, Any]], promise)
+            }
+          }
+        case cache =>
+          val iter = map.iterator
+          ZIO.whileLoop(iter.hasNext) {
+            Promise.makeAs[Any, Any](fiberId).flatMap { promise =>
+              val (request, exit) = iter.next()
+              cache
+                .get(request)
+                .orElse(
+                  promise.done(exit) *>
+                    cache.put(request.asInstanceOf[Request[Any, Any]], promise)
+                )
+            }
+          }(_ => ())
+      }
+    }
 }
