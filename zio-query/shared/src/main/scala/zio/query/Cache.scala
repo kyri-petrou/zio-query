@@ -86,12 +86,12 @@ object Cache {
       ev: A <:< Request[E, B],
       trace: Trace
     ): UIO[Either[Promise[E, B], Promise[E, B]]] =
-      ZIO.fiberId.map(lookupUnsafe(request, _)(Unsafe.unsafe))
+      ZIO.succeed(lookupUnsafe(request)(Unsafe.unsafe))
 
-    def lookupUnsafe[E, A, B](request: Request[_, _], fiberId: FiberId)(implicit
+    def lookupUnsafe[E, A, B](request: Request[_, _])(implicit
       unsafe: Unsafe
     ): Either[Promise[E, B], Promise[E, B]] = {
-      val newPromise = Promise.unsafe.make[E, B](fiberId)
+      val newPromise = Promise.unsafe.make[E, B](FiberId.None)
       val existing   = map.putIfAbsent(request, newPromise).asInstanceOf[Promise[E, B]]
       if (existing eq null) Left(newPromise) else Right(existing)
     }

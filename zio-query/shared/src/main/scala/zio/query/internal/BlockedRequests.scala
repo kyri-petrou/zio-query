@@ -298,15 +298,13 @@ private[query] object BlockedRequests {
   )(implicit trace: Trace): UIO[Unit] =
     cache match {
       case cache: Cache.Default =>
-        ZIO.fiberIdWith { fiberId =>
-          ZIO.succeedUnsafe { implicit unsafe =>
-            map.foreach { case (request: Request[Any, Any], exit) =>
-              cache
-                .lookupUnsafe(request, fiberId)
-                .merge
-                .unsafe
-                .done(exit)
-            }
+        ZIO.succeedUnsafe { implicit unsafe =>
+          map.foreach { case (request: Request[Any, Any], exit) =>
+            cache
+              .lookupUnsafe(request)
+              .merge
+              .unsafe
+              .done(exit)
           }
         }
       case cache =>
