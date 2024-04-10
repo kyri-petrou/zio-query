@@ -111,14 +111,14 @@ private[query] sealed trait BlockedRequests[-R] { self =>
 
           dataSource
             .runAll(requests)
-            .catchAllCause { cause =>
+            .catchAllCause(cause =>
               ZIO.succeed {
-                val exit = Exit.failCause(cause).asInstanceOf[Exit[Any, Any]]
-                CompletedRequestMap.fromIterable(
-                  requests.flatten.map(r => r.asInstanceOf[Request[Any, Any]] -> exit)
+                CompletedRequestMap.fail(
+                  requests.flatten.asInstanceOf[Chunk[Request[Any, Any]]],
+                  cause
                 )
               }
-            }
+            )
             .flatMap { completedRequests =>
               ZQuery.cachingEnabled.getWith {
                 val completedRequestsM = completedRequests.toMutableMap

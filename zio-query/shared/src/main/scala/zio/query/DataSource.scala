@@ -70,7 +70,7 @@ trait DataSource[-R, -A] { self =>
         if (n < 1)
           ZIO.die(new IllegalArgumentException("batchN: n must be at least 1"))
         else
-          self.runAll(requests.foldLeft[Chunk[Chunk[A]]](Chunk.empty)(_ ++ _.grouped(n)))
+          self.runAll(requests.foldLeft(Chunk.newBuilder[Chunk[A]])(_ addAll _.grouped(n)).result())
     }
 
   /**
@@ -108,13 +108,20 @@ trait DataSource[-R, -A] { self =>
     new DataSource[R1, C] {
       val identifier = s"${self.identifier}.eitherWith(${that.identifier})(${f.description})"
       def runAll(requests: Chunk[Chunk[C]])(implicit trace: Trace): ZIO[R1, Nothing, CompletedRequestMap] =
-        ZIO
-          .foreach(requests) { requests =>
-            val (as, bs) = requests.partitionMap(f.value)
-            self.runAll(Chunk(as)).zipWithPar(that.runAll(Chunk(bs)))(_ ++ _)
-          }
-          .map(_.foldLeft(CompletedRequestMap.empty)(_ ++ _))
-
+        ZIO.suspendSucceed {
+          val iter = requests.iterator
+          val crm  = CompletedRequestMap.Mutable.empty(requests.foldLeft(0)(_ + _.size))
+          ZIO
+            .whileLoop(iter.hasNext) {
+              val reqs     = iter.next()
+              val (as, bs) = reqs.partitionMap(f.value)
+              self.runAll(Chunk.single(as)) <&> that.runAll(Chunk.single(bs))
+            } { case (l, r) =>
+              crm.addAll(l)
+              crm.addAll(r)
+            }
+            .as(crm)
+        }
     }
 
   override final def equals(that: Any): Boolean =
@@ -161,6 +168,7 @@ trait DataSource[-R, -A] { self =>
 }
 
 object DataSource {
+  import UtilsVersionSpecific._
 
   /**
    * A data source that executes requests that can be performed in parallel in
@@ -169,15 +177,30 @@ object DataSource {
    */
   trait Batched[-R, -A] extends DataSource[R, A] {
     def run(requests: Chunk[A])(implicit trace: Trace): ZIO[R, Nothing, CompletedRequestMap]
+
     final def runAll(requests: Chunk[Chunk[A]])(implicit trace: Trace): ZIO[R, Nothing, CompletedRequestMap] =
-      ZIO.foldLeft(requests)(CompletedRequestMap.empty) { case (completedRequestMap, requests) =>
-        if (completedRequestMap.isEmpty && requests.nonEmpty) run(requests)
-        else {
-          val newRequests = requests.filterNot(completedRequestMap.contains)
-          if (newRequests.isEmpty) ZIO.succeed(completedRequestMap)
-          else run(newRequests).map(completedRequestMap ++ _)
-        }
+      requests.size match {
+        case 0 => ZIO.succeed(CompletedRequestMap.empty)
+        case 1 =>
+          val reqs0 = requests.head
+          if (reqs0.nonEmpty) run(reqs0) else ZIO.succeed(CompletedRequestMap.empty)
+        case _ =>
+          ZIO.suspendSucceed {
+            val crm  = CompletedRequestMap.Mutable.empty(requests.foldLeft(0)(_ + _.size))
+            val iter = requests.iterator
+            ZIO
+              .whileLoop(iter.hasNext) {
+                val reqs        = iter.next()
+                val newRequests = if (crm.isEmpty) reqs else reqs.filterNot(crm.contains)
+                ZIO.when(newRequests.nonEmpty)(run(newRequests))
+              } {
+                case Some(map) => crm.addAll(map)
+                case _         => ()
+              }
+              .as(crm)
+          }
       }
+
   }
 
   object Batched {
@@ -203,7 +226,7 @@ object DataSource {
     new DataSource.Batched[Any, A] {
       val identifier: String = name
       def run(requests: Chunk[A])(implicit trace: Trace): ZIO[Any, Nothing, CompletedRequestMap] =
-        ZIO.succeed(CompletedRequestMap.fromIterable(requests.map(a => (ev(a), Exit.succeed(f(a))))))
+        ZIO.succeed(CompletedRequestMap.fromIterableWith(requests)(a => Exit.succeed(f(a))))
     }
 
   /**
@@ -278,10 +301,10 @@ object DataSource {
       def run(requests: Chunk[A])(implicit trace: Trace): ZIO[R, Nothing, CompletedRequestMap] =
         f(requests)
           .foldCause(
-            e => requests.map(a => (ev(a), Exit.failCause(e))),
-            bs => bs.map(b => (g(b), Exit.succeed(b)))
+            e => CompletedRequestMap.fail(ev.liftCo(requests), e),
+            bs => CompletedRequestMap.unsafe.fromWith(bs, bs)(g(_), Exit.succeed)
           )
-          .map(CompletedRequestMap.fromIterable)
+
     }
 
   /**
@@ -298,10 +321,9 @@ object DataSource {
       def run(requests: Chunk[A])(implicit trace: Trace): ZIO[R, Nothing, CompletedRequestMap] =
         f(requests)
           .foldCause(
-            e => requests.map(a => (ev(a), Exit.failCause(e))),
-            bs => requests.zipWith(bs)((a, b) => (ev(a), Exit.succeed(b)))
+            e => CompletedRequestMap.fail(ev.liftCo(requests), e),
+            CompletedRequestMap.unsafe.fromSuccesses(ev.liftCo(requests), _)
           )
-          .map(CompletedRequestMap.fromIterable)
     }
 
   /**
@@ -314,8 +336,8 @@ object DataSource {
       val identifier: String = name
       def run(requests: Chunk[A])(implicit trace: Trace): ZIO[R, Nothing, CompletedRequestMap] =
         ZIO
-          .foreachPar(requests)(a => f(a).exit.map((ev(a), _)))
-          .map(CompletedRequestMap.fromIterable)
+          .foreachPar(requests)(a => f(a).exit)
+          .map(CompletedRequestMap.unsafe.fromExits(ev.liftCo(requests), _))
     }
 
   /**
@@ -362,4 +384,5 @@ object DataSource {
       def runAll(requests: Chunk[Chunk[Any]])(implicit trace: Trace): ZIO[Any, Nothing, CompletedRequestMap] =
         ZIO.never
     }
+
 }
