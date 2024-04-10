@@ -1326,37 +1326,35 @@ object ZQuery {
     request0: => A
   )(dataSource0: => DataSource[R, A])(implicit ev: A <:< Request[E, B], trace: Trace): ZQuery[R, E, B] =
     ZQuery {
-      ZIO.fiberIdWith { fiberId =>
+      ZQuery.cachingEnabled.getWith { isCachingEnabled =>
         val request    = request0
         val dataSource = dataSource0
-        ZQuery.cachingEnabled.getWith {
-          if (_) {
-            def foldPromise(either: Either[Promise[E, B], Promise[E, B]]): UIO[Result[R, E, B]] = either match {
-              case Left(promise) =>
-                ZIO.succeed(
-                  Result.blocked(
-                    BlockedRequests.single(dataSource, BlockedRequest(request, promise)),
-                    Continue(promise)
-                  )
+        if (isCachingEnabled) {
+          def foldPromise(either: Either[Promise[E, B], Promise[E, B]]): UIO[Result[R, E, B]] = either match {
+            case Left(promise) =>
+              ZIO.succeed(
+                Result.blocked(
+                  BlockedRequests.single(dataSource, BlockedRequest(request, promise)),
+                  Continue(promise)
                 )
-              case Right(promise) =>
-                promise.poll.flatMap {
-                  case None     => ZIO.succeed(Result.blocked(BlockedRequests.empty, Continue(promise)))
-                  case Some(io) => io.exit.map(Result.fromExit)
-                }
-            }
-            ZQuery.currentCache.getWith {
-              case cache: Cache.Default => foldPromise(cache.lookupUnsafe(request, fiberId)(Unsafe.unsafe))
-              case cache                => cache.lookup(request).flatMap(foldPromise)
-            }
-          } else {
-            ZIO.succeed {
-              val promise = Promise.unsafe.make[E, B](fiberId)(Unsafe.unsafe)
-              Result.blocked(
-                BlockedRequests.single(dataSource, BlockedRequest(request, promise)),
-                Continue(promise)
               )
-            }
+            case Right(promise) =>
+              promise.poll.flatMap {
+                case None     => ZIO.succeed(Result.blocked(BlockedRequests.empty, Continue(promise)))
+                case Some(io) => io.exit.map(Result.fromExit)
+              }
+          }
+          ZQuery.currentCache.getWith {
+            case cache: Cache.Default => foldPromise(cache.lookupUnsafe(request)(Unsafe.unsafe))
+            case cache                => cache.lookup(request).flatMap(foldPromise)
+          }
+        } else {
+          ZIO.succeed {
+            val promise = Promise.unsafe.make[E, B](FiberId.None)(Unsafe.unsafe)
+            Result.blocked(
+              BlockedRequests.single(dataSource, BlockedRequest(request, promise)),
+              Continue(promise)
+            )
           }
         }
       }
