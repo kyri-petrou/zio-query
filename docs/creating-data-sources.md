@@ -41,22 +41,20 @@ val identifier: String = "UserDataSource"
 We will define two different behaviors depending on whether we receive a single request or multiple requests at once. For each request, we need to insert into the result map a value of type `Exit` (`fail` for an error and `succeed` for a success).
 
 ```scala mdoc:silent
-def run(requests: Chunk[GetUserName]): ZIO[Any, Nothing, CompletedRequestMap] = {
-  val resultMap = CompletedRequestMap.empty
+def run(requests: Chunk[GetUserName]): ZIO[Any, Nothing, CompletedRequestMap] =
   requests.toList match {
     case request :: Nil =>
       // get user by ID e.g. SELECT name FROM users WHERE id = $id
       val result: Task[String] = ???
-      result.exit.map(resultMap.insert(request, _))
+      result.exit.map(CompletedRequestMap.single(request, _))
     case batch =>
       // get multiple users at once e.g. SELECT id, name FROM users WHERE id IN ($ids)
       val result: Task[List[(Int, String)]] = ???
-      result.fold(
-        err => requests.foldLeft(resultMap) { case (map, req) => map.insert(req, Exit.fail(err)) },
-        _.foldLeft(resultMap) { case (map, (id, name)) => map.insert(GetUserName(id), Exit.succeed(name)) }
+      result.foldCause(
+        CompletedRequestMap.failCause(requests, _),
+        CompletedRequestMap.fromIterableWith(_)(kv => GetUserName(kv._1), kv => Exit.succeed(kv._2))
       )
   }
-}
 ```
 
 Now to build a `ZQuery`, we can use `ZQuery.fromRequest` and just pass the request and the data source:
