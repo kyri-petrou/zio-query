@@ -492,23 +492,26 @@ final class ZQuery[-R, +E, +A] private (private val step: ZIO[R, Nothing, Result
    * Returns an effect that models executing this query with the specified
    * cache.
    */
-  final def runCache(cache: => Cache)(implicit trace: Trace): ZIO[R, E, A] = {
-
-    def run(query: ZQuery[R, E, A]): ZIO[R, E, A] =
-      query.step.flatMap {
-        case Result.Blocked(br, Continue.Effect(c)) => br.run *> run(c)
-        case Result.Blocked(br, Continue.Get(io))   => br.run *> io
-        case Result.Done(a)                         => ZIO.succeed(a)
-        case Result.Fail(e)                         => ZIO.failCause(e)
-      }
-
+  final def runCache(cache: => Cache)(implicit trace: Trace): ZIO[R, E, A] =
     ZIO.acquireReleaseExitWith {
       Scope.make
     } { (scope: Scope.Closeable, exit: Exit[E, A]) =>
       scope.close(exit)
     } { scope =>
-      ZQuery.currentScope.locally(scope)(ZQuery.currentCache.locally(cache)(run(self)))
+      ZQuery.currentScope.locally(scope)(ZQuery.currentCache.locally(cache)(runCurrentCache))
     }
+
+  private[query] def runCurrentCache(implicit trace: Trace): ZIO[R, E, A] = {
+
+    def run(query: ZQuery[R, E, A]): ZIO[R, E, A] =
+      query.step.flatMap {
+        case Result.Blocked(br, Continue.Effect(c)) => br.run.fork *> run(c)
+        case Result.Blocked(br, Continue.Get(io))   => br.run *> io
+        case Result.Done(a)                         => ZIO.succeed(a)
+        case Result.Fail(e)                         => ZIO.failCause(e)
+      }
+
+    run(self)
   }
 
   /**
