@@ -129,7 +129,7 @@ private[query] sealed trait BlockedRequests[-R] { self =>
                     completedRequestsM.remove(req) orElse completedRequests.lookup(req)
                   }
                   // cache responses that were not requested but were completed by the DataSource
-                  if (completedRequestsM.nonEmpty) cacheLeftovers(cache, completedRequestsM) else ZIO.unit
+                  if (completedRequestsM.nonEmpty) cacheLeftovers(cache, dataSource, completedRequestsM) else ZIO.unit
                 } else {
                   // No need to remove entries here since we don't need to know which ones we need to put in the cache
                   ZIO.succeed(completePromises(dataSource, sequential)(completedRequestsM.get))
@@ -295,6 +295,7 @@ private[query] object BlockedRequests {
 
   private def cacheLeftovers(
     cache: Cache,
+    dataSource: DataSource[?, Any],
     map: mutable.HashMap[Request[_, _], Exit[Any, Any]]
   )(implicit trace: Trace): UIO[Unit] =
     cache match {
@@ -302,7 +303,7 @@ private[query] object BlockedRequests {
         ZIO.succeedUnsafe { implicit unsafe =>
           map.foreach { case (request: Request[Any, Any], exit) =>
             cache
-              .lookupUnsafe(request)
+              .lookupUnsafe(dataSource, request)
               .merge
               .unsafe
               .done(exit)
@@ -310,7 +311,7 @@ private[query] object BlockedRequests {
         }
       case cache =>
         ZIO.foreachDiscard(map) { case (request: Request[Any, Any], exit) =>
-          cache.lookup(request).flatMap(_.merge.done(exit))
+          cache.lookup(dataSource, request).flatMap(_.merge.done(exit))
         }
     }
 }
