@@ -62,14 +62,14 @@ private[query] sealed trait BlockedRequests[-R] { self =>
     @tailrec
     def loop(in: List[BlockedRequests[R]], out: List[Either[BlockedRequestsCase, Z]]): List[Z] =
       in match {
-        case Empty :: blockedRequests =>
-          loop(blockedRequests, Right(folder.emptyCase) :: out)
         case Single(dataSource, blockedRequest) :: blockedRequests =>
           loop(blockedRequests, Right(folder.singleCase(dataSource, blockedRequest)) :: out)
         case Both(left, right) :: blockedRequests =>
           loop(left :: right :: blockedRequests, Left(BothCase) :: out)
         case Then(left, right) :: blockedRequests =>
           loop(left :: right :: blockedRequests, Left(ThenCase) :: out)
+        case Empty :: blockedRequests =>
+          loop(blockedRequests, Right(folder.emptyCase) :: out)
         case Nil =>
           out.foldLeft[List[Z]](List.empty) {
             case (acc, Right(blockedRequests)) =>
@@ -85,6 +85,8 @@ private[query] sealed trait BlockedRequests[-R] { self =>
 
     loop(List(self), List.empty).head
   }
+
+  final def isEmpty: Boolean = self eq Empty
 
   /**
    * Transforms all data sources with the specified data source aspect, which
@@ -158,7 +160,9 @@ private[query] object BlockedRequests {
 
   final case class Both[-R](left: BlockedRequests[R], right: BlockedRequests[R]) extends BlockedRequests[R]
 
-  case object Empty extends BlockedRequests[Any]
+  case object Empty extends BlockedRequests[Any] {
+    override def run(implicit trace: Trace): ZIO[Any, Nothing, Unit] = Exit.unit
+  }
 
   final case class Single[-R, A](dataSource: DataSource[R, A], blockedRequest: BlockedRequest[A])
       extends BlockedRequests[R]
@@ -239,11 +243,11 @@ private[query] object BlockedRequests {
       stack: List[BlockedRequests[R]]
     ): Unit =
       blockedRequests match {
-        case Empty =>
-          if (stack ne Nil) loop(stack.head, stack.tail)
         case Single(dataSource, request) =>
           parallel.addOne(dataSource, request)
           if (stack ne Nil) loop(stack.head, stack.tail)
+        case Both(left, right) =>
+          loop(left, right :: stack)
         case Then(left, right) =>
           left match {
             case Empty      => loop(right, stack)
@@ -252,8 +256,8 @@ private[query] object BlockedRequests {
               if (right ne Empty) sequential.prepend(right)
               loop(o, stack)
           }
-        case Both(left, right) =>
-          loop(left, right :: stack)
+        case Empty =>
+          if (stack ne Nil) loop(stack.head, stack.tail)
       }
 
     loop(c, List.empty)
