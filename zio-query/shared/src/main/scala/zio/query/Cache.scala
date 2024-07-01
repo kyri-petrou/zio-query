@@ -82,6 +82,7 @@ abstract class Cache {
 }
 
 object Cache {
+
   /**
    * Constructs an empty cache.
    */

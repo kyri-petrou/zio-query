@@ -18,13 +18,14 @@ object ZQuerySpec extends ZIOBaseSpec {
       },
       test("N + 1 on composed queries") {
         for {
-          ref   <- Ref.make(0)
-          ds     = countingDs(ref)
-          query1 = identityDs.query(IdReq(1)).flatMap(i => ds.query(CountingReq(i)))
-          query2 = identityDs.query(IdReq(2)).flatMap(i => ds.query(CountingReq(i)))
-          res   <- (query1 <~> query2).run
-          i     <- ref.get
-        } yield assertTrue(i == 1, res == ("1", "2"))
+          ref     <- Ref.make(0)
+          ds       = countingDs(ref)
+          query1   = identityDs.query(IdReq(1)).flatMap(i => ds.query(CountingReq(i)))
+          query2   = identityDs.query(IdReq(2)).flatMap(i => ds.query(CountingReq(i)))
+          res     <- (query1 <~> query2).run
+          i       <- ref.get
+          expected = ("1", "2")
+        } yield assertTrue(i == 1, res == expected)
       },
       test("requests are cached per datasource") {
         for {
