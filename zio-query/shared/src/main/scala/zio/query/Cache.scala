@@ -74,33 +74,52 @@ object Cache {
   def empty(expectedNumOfElements: Int)(implicit trace: Trace): UIO[Cache] =
     ZIO.succeed(Cache.unsafeMake(expectedNumOfElements))
 
-  private[query] final class Default(private val map: ConcurrentHashMap[Request[_, _], Promise[_, _]]) extends Cache {
+  /**
+   * A 'Synchronous' cache is one that doesn't require an effect to look up its
+   * value. Prefer extending this class when implementing a cache that doesn't
+   * perform any asynchronous IO.
+   */
+  abstract class Synchronous extends Cache {
+    def getOrNull[E, A](request: Request[E, A]): Promise[E, A]
+    def lookupNow[E, A, B](request: Request[_, _]): Either[Promise[E, B], Promise[E, B]]
+    def putNow[E, A](request: Request[E, A], result: Promise[E, A]): Unit
+    def removeNow[E, A](request: Request[E, A]): Unit
 
-    def get[E, A](request: Request[E, A])(implicit trace: Trace): IO[Unit, Promise[E, A]] =
+    final def get[E, A](request: Request[E, A])(implicit trace: Trace): IO[Unit, Promise[E, A]] =
       ZIO.suspendSucceed {
-        val out = map.get(request).asInstanceOf[Promise[E, A]]
-        if (out eq null) Exit.fail(()) else Exit.succeed(out)
+        val p = getOrNull(request)
+        if (p eq null) Exit.fail(()) else Exit.succeed(p)
       }
 
-    def lookup[E, A, B](request: A)(implicit
-      ev: A <:< Request[E, B],
-      trace: Trace
-    ): UIO[Either[Promise[E, B], Promise[E, B]]] =
-      ZIO.succeed(lookupUnsafe(request)(Unsafe.unsafe))
+    final def lookup[E, A, B](
+      request: A
+    )(implicit ev: A <:< Request[E, B], trace: Trace): UIO[Either[Promise[E, B], Promise[E, B]]] =
+      ZIO.succeed(lookupNow(request))
 
-    def lookupUnsafe[E, A, B](request: Request[_, _])(implicit
-      unsafe: Unsafe
-    ): Either[Promise[E, B], Promise[E, B]] = {
+    final def put[E, A](request: Request[E, A], result: Promise[E, A])(implicit trace: Trace): UIO[Unit] =
+      ZIO.succeed(putNow(request, result))
+
+    final def remove[E, A](request: Request[E, A])(implicit trace: Trace): UIO[Unit] =
+      ZIO.succeed(removeNow(request))
+  }
+
+  private final class Default(map: ConcurrentHashMap[Request[_, _], Promise[_, _]]) extends Synchronous {
+    private implicit val unsafe: Unsafe = Unsafe.unsafe
+
+    def getOrNull[E, A](request: Request[E, A]): Promise[E, A] =
+      map.get(request).asInstanceOf[Promise[E, A]]
+
+    def lookupNow[E, A, B](request: Request[_, _]): Either[Promise[E, B], Promise[E, B]] = {
       val newPromise = Promise.unsafe.make[E, B](FiberId.None)
       val existing   = map.putIfAbsent(request, newPromise).asInstanceOf[Promise[E, B]]
       if (existing eq null) Left(newPromise) else Right(existing)
     }
 
-    def put[E, A](request: Request[E, A], result: Promise[E, A])(implicit trace: Trace): UIO[Unit] =
-      ZIO.succeed(map.put(request, result))
+    def putNow[E, A](request: Request[E, A], result: Promise[E, A]): Unit =
+      map.put(request, result)
 
-    def remove[E, A](request: Request[E, A])(implicit trace: Trace): UIO[Unit] =
-      ZIO.succeed(map.remove(request))
+    def removeNow[E, A](request: Request[E, A]): Unit =
+      map.remove(request)
   }
 
   // TODO: Initialize the map with a sensible default value. Default is 16, which seems way too small for a cache

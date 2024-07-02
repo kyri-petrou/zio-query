@@ -1559,8 +1559,8 @@ object ZQuery {
       }
 
     cache match {
-      case cache: Cache.Default => foldPromise(cache.lookupUnsafe(request)(Unsafe.unsafe))
-      case cache                => CachedResult.Effectful(cache.lookup(request).flatMap(foldPromise(_).toZIO))
+      case cache: Cache.Synchronous => foldPromise(cache.lookupNow(request))
+      case cache                    => CachedResult.Effectful(cache.lookup(request).flatMap(foldPromise(_).toZIO))
     }
   }
 
