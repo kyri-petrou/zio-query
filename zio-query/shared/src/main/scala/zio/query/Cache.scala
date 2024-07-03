@@ -75,13 +75,13 @@ object Cache {
     ZIO.succeed(Cache.unsafeMake(expectedNumOfElements))
 
   /**
-   * A 'Synchronous' cache is one that doesn't require an effect to look up its
+   * An 'Eager' cache is one that doesn't require an effect to look up its
    * value. Prefer extending this class when implementing a cache that doesn't
-   * perform any asynchronous IO.
+   * perform any IO, such as a cache based on a Map.
    */
-  abstract class Synchronous extends Cache {
+  abstract class Eager extends Cache {
     def getOrNull[E, A](request: Request[E, A]): Promise[E, A]
-    def lookupNow[E, A, B](request: Request[_, _]): Either[Promise[E, B], Promise[E, B]]
+    def lookupNow[E, A](request: Request[E, A]): Either[Promise[E, A], Promise[E, A]]
     def putNow[E, A](request: Request[E, A], result: Promise[E, A]): Unit
     def removeNow[E, A](request: Request[E, A]): Unit
 
@@ -103,15 +103,15 @@ object Cache {
       ZIO.succeed(removeNow(request))
   }
 
-  private final class Default(map: ConcurrentHashMap[Request[_, _], Promise[_, _]]) extends Synchronous {
+  private final class Default(map: ConcurrentHashMap[Request[_, _], Promise[_, _]]) extends Eager {
     private implicit val unsafe: Unsafe = Unsafe.unsafe
 
     def getOrNull[E, A](request: Request[E, A]): Promise[E, A] =
       map.get(request).asInstanceOf[Promise[E, A]]
 
-    def lookupNow[E, A, B](request: Request[_, _]): Either[Promise[E, B], Promise[E, B]] = {
-      val newPromise = Promise.unsafe.make[E, B](FiberId.None)
-      val existing   = map.putIfAbsent(request, newPromise).asInstanceOf[Promise[E, B]]
+    def lookupNow[E, A](request: Request[E, A]): Either[Promise[E, A], Promise[E, A]] = {
+      val newPromise = Promise.unsafe.make[E, A](FiberId.None)
+      val existing   = map.putIfAbsent(request, newPromise).asInstanceOf[Promise[E, A]]
       if (existing eq null) Left(newPromise) else Right(existing)
     }
 

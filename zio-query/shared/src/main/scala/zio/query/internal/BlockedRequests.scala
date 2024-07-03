@@ -312,7 +312,7 @@ private[query] object BlockedRequests {
     map: mutable.HashMap[Request[_, _], Exit[Any, Any]]
   )(implicit trace: Trace): UIO[Unit] =
     cache match {
-      case cache: Cache.Synchronous =>
+      case cache: Cache.Eager =>
         ZIO.succeedUnsafe { implicit unsafe =>
           map.foreach { case (request: Request[Any, Any], exit) =>
             cache
