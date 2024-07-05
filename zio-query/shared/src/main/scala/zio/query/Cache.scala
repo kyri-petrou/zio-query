@@ -75,20 +75,22 @@ object Cache {
     ZIO.succeed(Cache.unsafeMake(expectedNumOfElements))
 
   /**
-   * An 'Eager' cache is one that doesn't require an effect to look up its
+   * An 'InMemory' cache is one that doesn't require an effect to look up its
    * value. Prefer extending this class when implementing a cache that doesn't
    * perform any IO, such as a cache based on a Map.
    */
-  abstract class Eager extends Cache {
-    def getOrNull[E, A](request: Request[E, A]): Promise[E, A]
+  abstract class InMemory extends Cache {
+    def getNow[E, A](request: Request[E, A]): Option[Promise[E, A]]
     def lookupNow[E, A](request: Request[E, A]): Either[Promise[E, A], Promise[E, A]]
     def putNow[E, A](request: Request[E, A], result: Promise[E, A]): Unit
     def removeNow[E, A](request: Request[E, A]): Unit
 
     final def get[E, A](request: Request[E, A])(implicit trace: Trace): IO[Unit, Promise[E, A]] =
       ZIO.suspendSucceed {
-        val p = getOrNull(request)
-        if (p eq null) Exit.fail(()) else Exit.succeed(p)
+        getNow(request) match {
+          case Some(p) => Exit.succeed(p)
+          case _       => Exit.fail(())
+        }
       }
 
     final def lookup[E, A, B](
@@ -103,11 +105,11 @@ object Cache {
       ZIO.succeed(removeNow(request))
   }
 
-  private final class Default(map: ConcurrentHashMap[Request[_, _], Promise[_, _]]) extends Eager {
+  private final class NonExpiringCache(map: ConcurrentHashMap[Request[_, _], Promise[_, _]]) extends InMemory {
     private implicit val unsafe: Unsafe = Unsafe.unsafe
 
-    def getOrNull[E, A](request: Request[E, A]): Promise[E, A] =
-      map.get(request).asInstanceOf[Promise[E, A]]
+    def getNow[E, A](request: Request[E, A]): Option[Promise[E, A]] =
+      Option(map.get(request).asInstanceOf[Promise[E, A]])
 
     def lookupNow[E, A](request: Request[E, A]): Either[Promise[E, A], Promise[E, A]] = {
       val newPromise = Promise.unsafe.make[E, A](FiberId.None)
@@ -123,10 +125,10 @@ object Cache {
   }
 
   // TODO: Initialize the map with a sensible default value. Default is 16, which seems way too small for a cache
-  private[query] def unsafeMake(): Cache = new Default(new ConcurrentHashMap())
+  private[query] def unsafeMake(): Cache = new NonExpiringCache(new ConcurrentHashMap())
 
   private[query] def unsafeMake(expectedNumOfElements: Int): Cache = {
     val initialSize = Math.ceil(expectedNumOfElements / 0.75d).toInt
-    new Default(new ConcurrentHashMap(initialSize))
+    new NonExpiringCache(new ConcurrentHashMap(initialSize))
   }
 }
