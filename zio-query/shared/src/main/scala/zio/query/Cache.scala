@@ -79,7 +79,7 @@ object Cache {
    * value. Prefer extending this class when implementing a cache that doesn't
    * perform any IO, such as a cache based on a Map.
    */
-  abstract class InMemory extends Cache {
+  abstract class InMemoryCache extends Cache {
     def getNow[E, A](request: Request[E, A]): Option[Promise[E, A]]
     def lookupNow[E, A](request: Request[E, A]): Either[Promise[E, A], Promise[E, A]]
     def putNow[E, A](request: Request[E, A], result: Promise[E, A]): Unit
@@ -105,7 +105,7 @@ object Cache {
       ZIO.succeed(removeNow(request))
   }
 
-  private final class NonExpiringCache(map: ConcurrentHashMap[Request[_, _], Promise[_, _]]) extends InMemory {
+  private final class NonExpiringCache(map: ConcurrentHashMap[Request[_, _], Promise[_, _]]) extends InMemoryCache {
     private implicit val unsafe: Unsafe = Unsafe.unsafe
 
     def getNow[E, A](request: Request[E, A]): Option[Promise[E, A]] =
