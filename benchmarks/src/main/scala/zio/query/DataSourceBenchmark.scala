@@ -55,6 +55,7 @@ class DataSourceBenchmark {
   @Benchmark
   def fetchSumDuplicatedBenchmark(): Long = {
     import FetchImpl._
+    import fetch.fetchM
     type FIO[A] = Fetch[IO, A]
 
     val reqs  = (0 until count).toList.map(i => fetchPlusOne(1))
@@ -64,6 +65,7 @@ class DataSourceBenchmark {
 
   @Benchmark
   def fetchSumUniqueBenchmark(): Long = {
+    import fetch.fetchM
     import FetchImpl._
     type FIO[A] = Fetch[IO, A]
 

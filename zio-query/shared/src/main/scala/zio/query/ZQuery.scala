@@ -187,7 +187,13 @@ final class ZQuery[-R, +E, +A] private (private val step: ZIO[R, Nothing, Result
    *   [[memoize]] for memoizing the result of a single query
    */
   def cached(implicit trace: Trace): ZQuery[R, E, A] =
-    ZQuery.acquireReleaseWith(ZQuery.cachingEnabled.getAndSet(true))(ZQuery.cachingEnabled.set)(_ => self)
+    ZQuery.unwrap(ZQuery.disabledCache.get.map {
+      case None => self
+      case s =>
+        val acq = ZQuery.disabledCache.set(None) *> ZQuery.currentCache.set(s)
+        val rel = ZQuery.disabledCache.set(s) *> ZQuery.currentCache.set(None)
+        ZQuery.acquireReleaseWith(acq)(_ => rel)(_ => self)
+    })
 
   /**
    * Recovers from all errors.
@@ -539,7 +545,7 @@ final class ZQuery[-R, +E, +A] private (private val step: ZIO[R, Nothing, Result
         ZIO.uninterruptibleMask { restore =>
           ZIO.withFiberRuntime[R, E, A] { (state, _) =>
             val scope = QueryScope.make()
-            state.setFiberRef(ZQuery.currentCache, cache)
+            state.setFiberRef(ZQuery.currentCache, Some(cache))
             state.setFiberRef(ZQuery.currentScope, scope)
             restore(runToZIO).exitWith { exit =>
               state.deleteFiberRef(ZQuery.currentCache)
@@ -680,7 +686,13 @@ final class ZQuery[-R, +E, +A] private (private val step: ZIO[R, Nothing, Result
    * Disables caching for this query.
    */
   def uncached(implicit trace: Trace): ZQuery[R, E, A] =
-    ZQuery.acquireReleaseWith(ZQuery.cachingEnabled.getAndSet(false))(ZQuery.cachingEnabled.set)(_ => self)
+    ZQuery.unwrap(ZQuery.currentCache.get.map {
+      case None => self
+      case s =>
+        val acq = ZQuery.disabledCache.set(s) *> ZQuery.currentCache.set(None)
+        val rel = ZQuery.disabledCache.set(None) *> ZQuery.currentCache.set(s)
+        ZQuery.acquireReleaseWith(acq)(_ => rel)(_ => self)
+    })
 
   /**
    * Converts a `ZQuery[R, Either[E, B], A]` into a `ZQuery[R, E, Either[A,
@@ -1451,13 +1463,9 @@ object ZQuery {
     request0: => A
   )(dataSource0: => DataSource[R, A])(implicit ev: A <:< Request[E, B], trace: Trace): ZQuery[R, E, B] =
     ZQuery {
-      ZQuery.cachingEnabled.getWith { isCachingEnabled =>
-        val request    = request0
-        val dataSource = dataSource0
-        if (isCachingEnabled)
-          ZQuery.currentCache.getWith(cachedResult(_, dataSource, request).toZIO)
-        else
-          uncachedResult(dataSource, request)
+      ZQuery.currentCache.getWith {
+        case Some(cache) => cachedResult(cache, dataSource0, request0).toZIO
+        case _           => uncachedResult(dataSource0, request0)
       }
     }
 
@@ -1512,12 +1520,9 @@ object ZQuery {
     f: In => A
   )(dataSource: DataSource[R, A])(implicit ev: A <:< Request[E, B], trace: Trace): ZQuery[R, E, Chunk[B]] =
     ZQuery {
-      ZQuery.cachingEnabled.getWith {
-        if (_) {
-          ZQuery.currentCache.getWith(cache => CachedResult.foreach(as)(r => cachedResult(cache, dataSource, f(r))))
-        } else {
-          ZIO.foreach(as)(r => uncachedResult(dataSource, f(r)))
-        }
+      ZQuery.currentCache.getWith {
+        case Some(cache) => CachedResult.foreach(as)(r => cachedResult(cache, dataSource, f(r)))
+        case _           => ZIO.foreach(as)(r => uncachedResult(dataSource, f(r)))
       }.map(collectResults(as, _, mode = 2))
     }
 
@@ -1531,12 +1536,9 @@ object ZQuery {
     f: In => A
   )(dataSource: DataSource[R, A])(implicit ev: A <:< Request[E, B], trace: Trace): ZQuery[R, E, List[B]] =
     ZQuery {
-      ZQuery.cachingEnabled.getWith {
-        if (_) {
-          ZQuery.currentCache.getWith(cache => CachedResult.foreach(as)(r => cachedResult(cache, dataSource, f(r))))
-        } else {
-          ZIO.foreach(as)(r => uncachedResult(dataSource, f(r)))
-        }
+      ZQuery.currentCache.getWith {
+        case Some(cache) => CachedResult.foreach(as)(r => cachedResult(cache, dataSource, f(r)))
+        case _           => ZIO.foreach(as)(r => uncachedResult(dataSource, f(r)))
       }.map(collectResults(as, _, mode = 2))
     }
 
@@ -1825,11 +1827,15 @@ object ZQuery {
     (bs.result(), cs.result())
   }
 
+  @deprecated("No longer used, kept for binary compatibility only", "0.7.4")
   val cachingEnabled: FiberRef[Boolean] =
     FiberRef.unsafe.make(true)(Unsafe.unsafe)
 
-  val currentCache: FiberRef[Cache] =
-    FiberRef.unsafe.make(Cache.unsafeMake())(Unsafe.unsafe)
+  val currentCache: FiberRef[Option[Cache]] =
+    FiberRef.unsafe.make(Option.empty[Cache])(Unsafe.unsafe)
+
+  private val disabledCache: FiberRef[Option[Cache]] =
+    FiberRef.unsafe.make(Option.empty[Cache])(Unsafe.unsafe)
 
   val currentScope: FiberRef[QueryScope] =
     FiberRef.unsafe.make[QueryScope](QueryScope.NoOp)(Unsafe.unsafe)
