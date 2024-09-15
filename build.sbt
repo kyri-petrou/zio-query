@@ -18,7 +18,7 @@ lazy val allScalas = List("2.12", "2.13", "3.3")
 inThisBuild(
   List(
     name         := "ZIO Query",
-    zioVersion   := "2.1.8",
+    zioVersion   := "2.1.9",
     scalaVersion := scalaV,
     developers := List(
       Developer(
@@ -72,7 +72,7 @@ lazy val zioQuery = crossProject(JSPlatform, JVMPlatform, NativePlatform)
            "-opt:l:method",
            "-opt:l:inline",
            "-opt-inline-from:scala.**",
-           "-opt-inline-from:zio.**"
+           "-opt-inline-from:zio.query.**"
          ) ++ (if (isRelease) Seq("-Xelide-below", "2001") else Seq())
        })
   )
