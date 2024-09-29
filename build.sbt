@@ -28,7 +28,8 @@ inThisBuild(
         url("https://github.com/kyri-petrou")
       )
     ),
-    versionScheme := Some("early-semver")
+    versionScheme := Some("early-semver"),
+    scalacOptions ++= (if (scalaBinaryVersion.value == "3") Seq() else Seq("-Xsource:3"))
   )
 )
 
@@ -69,7 +70,6 @@ lazy val zioQuery = crossProject(JSPlatform, JVMPlatform, NativePlatform)
          Seq()
        else {
          Seq(
-           "-Xsource:3",
            "-opt:l:method",
            "-opt:l:inline",
            "-opt-inline-from:scala.**",
@@ -107,8 +107,7 @@ lazy val zioQueryJVM = zioQuery.jvm.settings(enableMimaSettingsJVM)
 lazy val benchmarks = project
   .in(file("benchmarks"))
   .settings(
-    crossScalaVersions := List(scala213, scala3),
-    scalacOptions ++= (if (scalaBinaryVersion.value == "3") Seq() else Seq("-Xsource:3"))
+    crossScalaVersions := List(scala213, scala3)
   )
   .dependsOn(zioQueryJVM)
   .enablePlugins(JmhPlugin)
