@@ -70,6 +70,7 @@ lazy val zioQuery = crossProject(JSPlatform, JVMPlatform, NativePlatform)
          Seq()
        else {
          Seq(
+           "-Xsource:3",
            "-opt:l:method",
            "-opt:l:inline",
            "-opt-inline-from:scala.**",
