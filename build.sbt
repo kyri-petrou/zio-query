@@ -120,7 +120,7 @@ lazy val docs = project
     moduleName := "zio-query-docs",
     scalacOptions -= "-Yno-imports",
     scalacOptions -= "-Xfatal-warnings",
-    scalacOptions -= "-Xsource:3",
+    scalacOptions += "-Wconf:msg=.*:silent",
     projectName                                := (ThisBuild / name).value,
     mainModuleName                             := (zioQueryJVM / moduleName).value,
     crossScalaVersions                         := Seq(scalaV),
