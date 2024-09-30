@@ -12,7 +12,7 @@ lazy val scala212 = "2.12.20"
 lazy val scala213 = "2.13.15"
 lazy val scala3   = "3.3.4"
 
-lazy val scalaV    = scala213
+lazy val scalaV    = scala3
 lazy val allScalas = List("2.12", "2.13", "3.3")
 
 inThisBuild(
